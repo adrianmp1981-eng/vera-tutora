@@ -38,7 +38,7 @@ const VERA_IMAGE_PROMPT =
   "Confident, approachable, intelligent. Photorealistic, 85mm lens. " +
   "No text, no watermarks.";
 
-const getAI = () => new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || "" });
+const getAI = () => new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY || "" });
 
 export async function sendMessageToVera(messages: Message[], _currentMode: Mode): Promise<string> {
   const ai = getAI();
@@ -132,7 +132,7 @@ export async function generateVeraVideo(imageB64: string, prompt: string): Promi
     }
     const uri = operation.response?.generatedVideos?.[0]?.video?.uri;
     if (!uri) return null;
-    const videoResponse = await fetch(uri, { headers: { "x-goog-api-key": process.env.GEMINI_API_KEY || "" } });
+    const videoResponse = await fetch(uri, { headers: { "x-goog-api-key": import.meta.env.VITE_GEMINI_API_KEY || "" } });
     return URL.createObjectURL(await videoResponse.blob());
   } catch (error) {
     return null;
