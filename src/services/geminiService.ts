@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { Message, Mode, UserMemory } from "../types";
+import { Message, Mode, UserMemory, Simulation } from "../types";
 import { getMemory } from "./memoryService";
 
 const PORTRAIT_CACHE_KEY = "vera_portrait_b64";
@@ -8,10 +8,21 @@ const MODELS = {
   chat:    "gemini-2.0-flash",
   summary: "gemini-3-flash-preview",
   image:   "imagen-3.0-generate-002",
-  tts:     "gemini-2.5-flash-preview-tts",
 };
 
-const SYSTEM_INSTRUCTION_BASE = `You are Vera, an elite personal tutor with deep expertise in multiple fields. You speak in natural California American English. You are warm, direct, and highly knowledgeable. You adapt your teaching style to each person.
+const SYSTEM_INSTRUCTION_SHORT = `You are Vera, an elite personal tutor. You speak in natural California American English. You are warm, direct, and highly knowledgeable.
+
+YOUR CORE RULES:
+- Always respond in the same language the user writes in (Spanish or English).
+- If in English mode, always respond in English even if the user writes in Spanish.
+- Teach one concept at a time, check understanding, then move on.
+- Use real examples from the user's industry (logistics, football, business).
+- Correct the user's language errors naturally.
+
+COMMANDS:
+/english, /portuguese, /habits, /learn [topic], /quiz [topic], /sports, /plan, /business, /coding, /logistics, /report, /summary.`;
+
+const SYSTEM_INSTRUCTION_FULL = `You are Vera, an elite personal tutor with deep expertise in multiple fields. You speak in natural California American English. You are warm, direct, and highly knowledgeable. You adapt your teaching style to each person.
 
 YOUR TEACHING PHILOSOPHY:
 - You use the most effective evidence-based learning methods
@@ -267,9 +278,17 @@ COMMANDS:
 /report → weekly progress report
 /summary → summarize today's session`;
 
-function buildSystemPrompt(mode?: Mode): string {
+function buildSystemPrompt(messages: Message[], lastMessage: string, mode?: Mode, simulationContext?: Simulation): string {
   const memory = getMemory();
-  let base = SYSTEM_INSTRUCTION_BASE;
+  
+  // Choose between short and full instructions based on context
+  const isFirstMessage = messages.length <= 2;
+  const isCommand = lastMessage.startsWith('/');
+  const isResourceRequest = /recursos|resources|books|libros/i.test(lastMessage);
+  
+  let base = (isFirstMessage || isCommand || isResourceRequest) 
+    ? SYSTEM_INSTRUCTION_FULL 
+    : SYSTEM_INSTRUCTION_SHORT;
 
   if (mode === 'business') {
     base += "\n\nCONTEXT: The user wants to learn about business and entrepreneurship. Teach with real examples, ask questions to check understanding, suggest practical exercises.";
@@ -279,6 +298,25 @@ function buildSystemPrompt(mode?: Mode): string {
     base += "\n\nCONTEXT: The user works in or wants to learn about logistics, supply chain, and transport. Use real industry examples. Teach Incoterms, freight types, WMS/TMS systems, KPIs. Connect everything to practical daily situations in logistics operations.";
   } else if (mode === 'portuguese') {
     base += "\n\nCONTEXT: The user wants to learn European Portuguese (Portugal). ALWAYS use European Portuguese, never Brazilian. Start by asking their current level (A1/A2/B1/B2/C1/C2) if not known from memory. Then teach according to their level. Use the complete curriculum. Correct their Portuguese writing immediately. Use visual aids (tables, flashcards) for vocabulary. Suggest resources when appropriate.";
+  } else if (mode === 'simulation' && simulationContext) {
+    base += `\n\nSIMULATION MODE — IMPORTANT:
+You are now playing the role of: ${simulationContext.veraRole}
+The user is playing the role of: ${simulationContext.userRole}
+Context: ${simulationContext.context}
+Language: Conduct the entire simulation in ${simulationContext.language}
+Objectives for the user: ${simulationContext.objectives.join(', ')}
+
+RULES FOR THIS SIMULATION:
+- Stay in character at ALL times during the simulation
+- React naturally as your character would — challenge the user, negotiate, push back
+- If the user makes a language error, note it but stay in character: "(Note: you said X, it should be Y) — [continue in character]"
+- After every 3-4 exchanges, give a brief out-of-character coaching tip in parentheses
+- When the user types /end or /stop, exit the simulation and give a full debrief:
+  * What went well
+  * Key errors made
+  * Vocabulary to remember
+  * Score out of 10
+  * What to practice next`;
   }
 
   base += "\n\nWhen you decide a visual would help, include it in your response using this format:\n[VISUAL_START]\n\n your HTML/SVG visual here \n\n[VISUAL_END]\nThen continue with your text explanation after the visual block.";
@@ -311,9 +349,15 @@ const VERA_IMAGE_PROMPT =
 
 const getAI = () => new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY || "" });
 
-export async function sendMessageToVera(messages: Message[], currentMode: Mode): Promise<string> {
+export async function sendMessageToVera(messages: Message[], currentMode: Mode, simulationContext?: Simulation): Promise<string> {
   const ai = getAI();
-  const history = messages.map((m) => ({ role: m.role, parts: [{ text: m.text }] }));
+  const lastMessage = messages[messages.length - 1]?.text || "";
+  
+  // Optimization: Reduce history sent to API (last 10 messages, max 500 chars each)
+  const history = messages.slice(-10).map((m) => ({ 
+    role: m.role, 
+    parts: [{ text: m.text.substring(0, 500) }] 
+  }));
   
   // Upgrade 2: Visual Content Prompt reinforcement
   const visualPrompt = `
@@ -329,14 +373,26 @@ export async function sendMessageToVera(messages: Message[], currentMode: Mode):
   `;
 
   try {
-    const response = await ai.models.generateContent({
+    const timeoutPromise = new Promise<never>((_, reject) => 
+      setTimeout(() => reject(new Error('Vera tardó demasiado. Intenta de nuevo.')), 15000)
+    );
+
+    const responsePromise = ai.models.generateContent({
       model: MODELS.chat,
       contents: [...history, { role: "user", parts: [{ text: visualPrompt }] }],
-      config: { systemInstruction: buildSystemPrompt(currentMode), temperature: 0.7 },
+      config: { 
+        systemInstruction: buildSystemPrompt(messages, lastMessage, currentMode, simulationContext), 
+        temperature: 0.5 
+      },
     });
+
+    const response = await Promise.race([responsePromise, timeoutPromise]);
     return response.text || "Sorry, I could not process that. Try again.";
   } catch (error) {
     console.error("Chat error:", error);
+    if (error instanceof Error && error.message === 'Vera tardó demasiado. Intenta de nuevo.') {
+      throw error;
+    }
     throw new Error("Vera no pudo responder. Revisa tu API key.");
   }
 }
@@ -404,23 +460,27 @@ export function clearVeraPortraitCache(): void {
   localStorage.removeItem(PORTRAIT_CACHE_KEY);
 }
 
-export async function generateVeraAudio(text: string): Promise<string | null> {
+export async function generateSimulationContext(simulation: Simulation): Promise<string> {
   const ai = getAI();
+  const prompt = `You are starting a role-play simulation.
+Simulation: ${simulation.title}
+Your Role: ${simulation.veraRole}
+User Role: ${simulation.userRole}
+Context: ${simulation.context}
+Language: ${simulation.language}
+
+Start the simulation as your character. Give the opening line to set the scene. Stay in character.`;
+
   try {
     const response = await ai.models.generateContent({
-      model: MODELS.tts,
-      contents: [{ parts: [{ text }] }],
-      config: {
-        responseModalities: ["AUDIO"],
-        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } },
-      },
+      model: MODELS.chat,
+      contents: [{ parts: [{ text: prompt }] }],
+      config: { temperature: 0.7 },
     });
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (!base64Audio) return null;
-    const blob = await fetch(`data:audio/wav;base64,${base64Audio}`).then(r => r.blob());
-    return URL.createObjectURL(blob);
+    return response.text || "Let's begin the simulation.";
   } catch (error) {
-    return null;
+    console.error("Simulation start error:", error);
+    return "Let's begin the simulation.";
   }
 }
 

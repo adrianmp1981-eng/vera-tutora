@@ -21,6 +21,8 @@ import {
   X,
   Volume2,
   VolumeX,
+  Mic,
+  MicOff,
   PlusCircle,
   LayoutGrid,
   Sparkles,
@@ -34,7 +36,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
-import { Message, Mode, SessionLog, UserMemory } from './types';
+import { Message, Mode, SessionLog, UserMemory, Simulation } from './types';
 import { 
   sendMessageToVera, 
   getSummary, 
@@ -42,7 +44,8 @@ import {
   correctEnglishText,
   generateStudyPlan,
   generateWeeklyReport,
-  searchResources
+  searchResources,
+  generateSimulationContext
 } from './services/geminiService';
 import { getMemory, saveMemory, updateMemory, hasMemory } from './services/memoryService';
 import { WeeklyStats } from './types';
@@ -89,6 +92,81 @@ const STORAGE_KEYS = {
   WEEKLY_STATS: 'vera_weekly_stats',
   LAST_REPORT: 'vera_last_report'
 };
+
+const SIMULATIONS: Simulation[] = [
+  {
+    id: 'job-interview-logistics',
+    title: 'Job Interview — Logistics Manager',
+    description: 'Practice a job interview for a logistics manager position at a major shipping company',
+    category: 'logistics',
+    difficulty: 'intermediate',
+    veraRole: 'HR Manager at DHL conducting a job interview for a Logistics Manager position',
+    userRole: 'Candidate applying for the Logistics Manager position',
+    context: 'This is a formal job interview at DHL headquarters. The position requires experience in supply chain management, warehouse operations, and team leadership.',
+    objectives: ['Answer competency questions', 'Demonstrate logistics knowledge', 'Ask good questions', 'Negotiate salary'],
+    language: 'english'
+  },
+  {
+    id: 'english-negotiation',
+    title: 'Business Negotiation in English',
+    description: 'Negotiate a contract with a supplier in English — price, terms and delivery',
+    category: 'english',
+    difficulty: 'intermediate',
+    veraRole: 'Sales Director at a European supplier company, tough negotiator who defends her prices',
+    userRole: 'Procurement Manager trying to get the best deal for your company',
+    context: 'You are in a video call negotiating a 12-month supply contract. The supplier wants €50,000, your budget is €38,000. You need to negotiate price, payment terms and delivery schedule.',
+    objectives: ['Negotiate in English naturally', 'Use negotiation vocabulary', 'Make counteroffers', 'Reach an agreement'],
+    language: 'english'
+  },
+  {
+    id: 'football-scouting',
+    title: 'Football Scouting Meeting',
+    description: 'Present your scouting report to the sporting director and defend your player recommendation',
+    category: 'football',
+    difficulty: 'advanced',
+    veraRole: 'Sporting Director of a Championship club, analytical and demanding, asks tough questions about data',
+    userRole: 'Head Scout presenting a player recommendation with data',
+    context: 'You are presenting a scouting report for a 24-year-old midfielder. You have xG data, passing stats and match footage analysis. Budget is £3M. The sporting director is skeptical.',
+    objectives: ['Use football analytics vocabulary', 'Defend your recommendation with data', 'Handle objections', 'Speak confidently in English'],
+    language: 'english'
+  },
+  {
+    id: 'logistics-crisis',
+    title: 'Supply Chain Crisis',
+    description: 'Manage a real-time supply chain disruption — a key supplier just failed',
+    category: 'logistics',
+    difficulty: 'advanced',
+    veraRole: 'CEO of your company who just found out a critical supplier failed to deliver, needs solutions NOW',
+    userRole: 'Supply Chain Manager who has to explain the situation and propose solutions',
+    context: 'Your main supplier in China has just declared bankruptcy. You have 48 hours before your production line stops. You need to find alternatives, manage stakeholders and communicate a plan.',
+    objectives: ['Crisis communication in English', 'Demonstrate supply chain knowledge', 'Propose concrete solutions', 'Stay calm under pressure'],
+    language: 'english'
+  },
+  {
+    id: 'portuguese-cafe',
+    title: 'Café em Lisboa',
+    description: 'Order coffee, ask for directions and chat with a local in European Portuguese',
+    category: 'portuguese',
+    difficulty: 'beginner',
+    veraRole: 'Friendly café owner in Lisbon who speaks no English',
+    userRole: 'Tourist visiting Lisbon for the first time',
+    context: 'You are in a traditional café in Lisbon. You want to order a coffee and a pastel de nata, ask about the best places to visit nearby, and practice basic conversation.',
+    objectives: ['Order food and drinks in Portuguese', 'Ask for directions', 'Use basic pleasantries', 'Understand European Portuguese accent'],
+    language: 'portuguese'
+  },
+  {
+    id: 'business-pitch',
+    title: 'Startup Pitch to Investors',
+    description: 'Pitch your business idea to a panel of investors and handle tough questions',
+    category: 'business',
+    difficulty: 'advanced',
+    veraRole: 'Skeptical venture capitalist who has seen thousands of pitches and asks hard questions about unit economics, market size and competition',
+    userRole: 'Startup founder pitching your idea for funding',
+    context: 'You have 5 minutes to pitch your startup idea and then face 10 minutes of questions. The investor is looking for a clear problem, scalable solution, realistic financials and strong team.',
+    objectives: ['Structure a clear pitch', 'Handle investor objections', 'Discuss financials confidently', 'Negotiate terms'],
+    language: 'english'
+  },
+];
 
 export default function App() {
   // Persistence initialization
@@ -148,6 +226,15 @@ export default function App() {
   });
   const [showReportModal, setShowReportModal] = useState(false);
 
+  // Voice Conversation System State
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(() => {
+    const saved = localStorage.getItem('vera_voice_enabled');
+    return saved !== null ? saved === 'true' : true;
+  });
+  const recognitionRef = useRef<any>(null);
+
   const [studyPlan, setStudyPlan] = useState<string | null>(() => {
     return localStorage.getItem('vera_study_plan');
   });
@@ -179,6 +266,8 @@ export default function App() {
   const [isAboutPanelOpen, setIsAboutPanelOpen] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [isHeaderDropdownOpen, setIsHeaderDropdownOpen] = useState(false);
+  const [activeSimulation, setActiveSimulation] = useState<Simulation | null>(null);
+  const [showSimulationPicker, setShowSimulationPicker] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const headerDropdownRef = useRef<HTMLDivElement>(null);
   
@@ -294,6 +383,175 @@ export default function App() {
     });
   };
 
+  useEffect(() => {
+    localStorage.setItem('vera_voice_enabled', String(voiceEnabled));
+    if (!voiceEnabled) {
+      stopSpeaking();
+    }
+  }, [voiceEnabled]);
+
+  const stopSpeaking = () => {
+    if (window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    setIsSpeaking(false);
+  };
+
+  const getVoice = (lang: string): SpeechSynthesisVoice | null => {
+    const voices = window.speechSynthesis.getVoices();
+    
+    if (lang === 'en-US') {
+      // Try these specific American voices in order of preference
+      const preferred = [
+        'Microsoft Aria Online (Natural) - English (United States)',
+        'Microsoft Jenny Online (Natural) - English (United States)', 
+        'Microsoft Guy Online (Natural) - English (United States)',
+        'Google US English',
+        'Samantha',
+        'Karen',
+        'Victoria',
+      ];
+      for (const name of preferred) {
+        const v = voices.find(v => v.name === name);
+        if (v) return v;
+      }
+      // Fallback: any en-US voice that is NOT from a Russian/Eastern European locale
+      return voices.find(v => 
+        v.lang === 'en-US' && 
+        !v.name.includes('Russian') && 
+        !v.name.includes('Pavel') &&
+        !v.name.includes('Irina') &&
+        !v.name.includes('ru-')
+      ) || voices.find(v => v.lang === 'en-US') || null;
+    }
+    
+    if (lang === 'pt-PT') {
+      return voices.find(v => v.lang === 'pt-PT') || 
+             voices.find(v => v.lang.startsWith('pt')) || null;
+    }
+    
+    if (lang === 'es-ES') {
+      return voices.find(v => v.lang === 'es-ES') || 
+             voices.find(v => v.lang.startsWith('es')) || null;
+    }
+    
+    return null;
+  };
+
+  const speakText = async (text: string) => {
+    if (!voiceEnabled) return;
+    if (!window.speechSynthesis) return;
+
+    window.speechSynthesis.cancel();
+    await new Promise(resolve => {
+      if (window.speechSynthesis.getVoices().length > 0) {
+        resolve(null);
+      } else {
+        window.speechSynthesis.onvoiceschanged = () => resolve(null);
+      }
+    });
+
+    // Clean markdown from text
+    const cleanText = text
+      .replace(/\*\*(.*?)\*\*/g, '$1')
+      .replace(/\*(.*?)\*/g, '$1')
+      .replace(/#{1,6}\s/g, '')
+      .replace(/\[.*?\]\(.*?\)/g, '')
+      .replace(/`.*?`/g, '')
+      .replace(/\[VISUAL_START\][\s\S]*?\[VISUAL_END\]/g, '')
+      .substring(0, 500); // limit to 500 chars to avoid very long speech
+
+    const utterance = new SpeechSynthesisUtterance(cleanText);
+
+    // Set language based on current mode
+    if (mode === 'portuguese') {
+      utterance.lang = 'pt-PT';
+    } else if (['english', 'sports', 'business', 'coding', 'logistics'].includes(mode)) {
+      utterance.lang = 'en-US';
+    } else {
+      utterance.lang = 'es-ES';
+    }
+
+    const selectedVoice = getVoice(utterance.lang);
+    if (selectedVoice) utterance.voice = selectedVoice;
+
+    utterance.rate = 0.95;
+    utterance.pitch = 1.05;
+    utterance.volume = 1;
+
+    utterance.onstart = () => setIsSpeaking(true);
+    utterance.onend = () => setIsSpeaking(false);
+    utterance.onerror = () => setIsSpeaking(false);
+
+    window.speechSynthesis.speak(utterance);
+  };
+
+  const startListening = () => {
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    
+    if (!SpeechRecognition) {
+      setError("Voice requires Chrome or Edge browser.");
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = false;
+      
+      // Language auto-detection based on mode
+      let lang = 'en-US';
+      if (mode === 'portuguese') lang = 'pt-PT';
+      else if (['general', 'learn', 'quiz', 'plan'].includes(mode)) lang = 'es-ES';
+      
+      recognition.lang = lang;
+      
+      recognition.onstart = () => {
+        setIsListening(true);
+        stopSpeaking();
+      };
+
+      recognition.onresult = (event: any) => {
+        const transcript = event.results[0][0].transcript;
+        if (transcript) {
+          setInput(transcript);
+          // Small delay to allow state update to be visible before sending
+          setTimeout(() => {
+            handleSend(undefined, transcript);
+          }, 500);
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.error("Speech Recognition Error:", event.error);
+        setIsListening(false);
+        if (event.error === 'not-allowed') {
+          setError("Microphone permission denied. Please enable it in your browser settings.");
+        } else {
+          setError(`Speech recognition error: ${event.error}`);
+        }
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+      };
+
+      recognition.start();
+      recognitionRef.current = recognition;
+    } catch (err) {
+      console.error("Speech Recognition Init Error:", err);
+      setError("Could not start speech recognition.");
+      setIsListening(false);
+    }
+  };
+
+  const stopListening = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      setIsListening(false);
+    }
+  };
+
   const handleSend = async (e?: React.FormEvent, overrideInput?: string) => {
     e?.preventDefault();
     const messageText = overrideInput || input;
@@ -325,6 +583,12 @@ export default function App() {
     else if (messageText.startsWith('/business')) detectedMode = 'business';
     else if (messageText.startsWith('/coding')) detectedMode = 'coding';
     else if (messageText.startsWith('/logistics')) detectedMode = 'logistics';
+    else if (messageText.startsWith('/simulate')) {
+      setShowSimulationPicker(true);
+      setIsLoading(false);
+      setInput('');
+      return;
+    }
     
     if (detectedMode !== mode) setMode(detectedMode);
     updateProgress(detectedMode);
@@ -350,8 +614,33 @@ export default function App() {
         timestamp: Date.now(),
       };
       setMessages(prev => [...prev, veraResponse]);
+      speakText(veraResponse.text);
       setIsLoading(false);
       setInput('');
+      return;
+    }
+
+    if (mode === 'simulation' && (messageText.toLowerCase().startsWith('/end') || messageText.toLowerCase().startsWith('/stop'))) {
+      const prevMode = localStorage.getItem(STORAGE_KEYS.MODE) as Mode || 'general';
+      setMode(prevMode);
+      setActiveSimulation(null);
+      
+      try {
+        const response = await sendMessageToVera([...messages, userMessage], 'simulation', activeSimulation || undefined);
+        const veraResponse: Message = {
+          id: generateId(),
+          role: 'model',
+          text: response,
+          timestamp: Date.now(),
+        };
+        setMessages(prev => [...prev, veraResponse]);
+        speakText(veraResponse.text);
+      } catch (err: any) {
+        setError(err.message || "Failed to get debrief.");
+      } finally {
+        setIsLoading(false);
+        setInput('');
+      }
       return;
     }
 
@@ -375,6 +664,7 @@ export default function App() {
           timestamp: Date.now(),
         };
         setMessages(prev => [...prev, veraResponse]);
+        speakText(veraResponse.text);
         setPlanStep(planStep + 1);
         setIsLoading(false);
         setInput('');
@@ -390,6 +680,7 @@ export default function App() {
             timestamp: Date.now(),
           };
           setMessages(prev => [...prev, veraResponse]);
+          speakText(veraResponse.text);
           setMode('general');
           setPlanStep(0);
         } catch (err: any) {
@@ -452,6 +743,7 @@ export default function App() {
 
     if (correctionMsg) {
       setMessages(prev => [...prev, correctionMsg!]);
+      speakText(correctionMsg.text);
     }
 
     const finalHistory = correctionMsg ? [...newMessages, correctionMsg] : newMessages;
@@ -466,6 +758,7 @@ export default function App() {
           timestamp: Date.now(),
         };
         setMessages(prev => [...prev, veraResponse]);
+        speakText(veraResponse.text);
       } catch (err: any) {
         setError(err.message || "No se pudo generar el resumen.");
       } finally {
@@ -486,6 +779,7 @@ export default function App() {
           timestamp: Date.now(),
         };
         setMessages(prev => [...prev, veraResponse]);
+        speakText(veraResponse.text);
       } catch (err: any) {
         setError(err.message || "Failed to generate report.");
       } finally {
@@ -510,6 +804,7 @@ export default function App() {
           timestamp: Date.now(),
         };
         setMessages(prev => [...prev, veraResponse]);
+        speakText(veraResponse.text);
       } catch (err: any) {
         setError("No se pudieron buscar recursos.");
       } finally {
@@ -520,7 +815,7 @@ export default function App() {
     }
 
     try {
-      let responseText = await sendMessageToVera(finalHistory, detectedMode);
+      let responseText = await sendMessageToVera(finalHistory, detectedMode, activeSimulation || undefined);
       
       // Upgrade 2: Parse visuals
       let visualContent = undefined;
@@ -546,10 +841,11 @@ export default function App() {
         timestamp: Date.now(),
       };
       setMessages(prev => [...prev, veraResponse]);
+      speakText(veraResponse.text);
 
       // Memory Updates
       updateMemory({ lastSeen: new Date().toISOString() });
-      if (newMessages.length % 5 === 0) {
+      if (newMessages.length % 15 === 0) {
         extractMemoryUpdates(newMessages).then(updates => {
           if (updates) {
             const current = getMemory();
@@ -566,6 +862,30 @@ export default function App() {
       }
     } catch (err: any) {
       setError(err.message || "Vera no pudo responder. Revisa tu API key.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const startSimulation = async (simulation: Simulation) => {
+    setActiveSimulation(simulation);
+    setMode('simulation');
+    setShowSimulationPicker(false);
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const openingLine = await generateSimulationContext(simulation);
+      const veraResponse: Message = {
+        id: generateId(),
+        role: 'model',
+        text: openingLine,
+        timestamp: Date.now(),
+      };
+      setMessages(prev => [...prev, veraResponse]);
+      speakText(veraResponse.text);
+    } catch (err: any) {
+      setError("Failed to start simulation.");
     } finally {
       setIsLoading(false);
     }
@@ -593,6 +913,7 @@ export default function App() {
       timestamp: Date.now(),
     };
     setMessages([initialMsg]);
+    speakText(initialMsg.text);
     setIsWelcomeScreen(false);
   };
 
@@ -613,6 +934,7 @@ export default function App() {
       business: { label: 'Business', icon: Briefcase, color: 'bg-amber-600/50 text-amber-100' },
       coding: { label: 'Coding', icon: Code, color: 'bg-teal-600/50 text-teal-100' },
       logistics: { label: 'Logistics', icon: Truck, color: 'bg-orange-600/50 text-orange-100' },
+      simulation: { label: 'Simulation', icon: Trophy, color: 'bg-indigo-600 text-white shadow-lg' },
     };
     const { label, icon: Icon, color } = config[currentMode];
     return (
@@ -785,7 +1107,7 @@ export default function App() {
       >
         <div className="p-8 flex flex-col items-center text-center">
           <div className="relative group mb-6">
-            <div className="w-36 h-36 rounded-full border-4 border-zinc-800 p-1 relative overflow-hidden bg-zinc-900 flex items-center justify-center">
+            <div className={`w-36 h-36 rounded-full border-4 ${isSpeaking ? 'border-indigo-500 shadow-[0_0_20px_rgba(99,102,241,0.5)]' : 'border-zinc-800'} p-1 relative overflow-hidden bg-zinc-900 flex items-center justify-center transition-all duration-500`}>
               <img 
                 src="/vera-avatar.jpg" 
                 alt="Vera Avatar" 
@@ -971,6 +1293,14 @@ export default function App() {
               >
                 <PlusCircle size={20} />
               </button>
+              {/* Voice Toggle */}
+              <button
+                onClick={() => setVoiceEnabled(!voiceEnabled)}
+                className={`w-10 h-10 flex items-center justify-center rounded-full transition-all ml-1 ${voiceEnabled ? 'text-indigo-500 bg-indigo-50' : 'text-zinc-400 hover:bg-zinc-100'}`}
+                title="Voice on/off"
+              >
+                {voiceEnabled ? <Volume2 size={20} /> : <VolumeX size={20} />}
+              </button>
 
               <AnimatePresence>
                 {isHeaderDropdownOpen && (
@@ -986,16 +1316,19 @@ export default function App() {
                         { id: 'logistics', label: 'Logistics', icon: Truck },
                         { id: 'quiz', label: 'Quiz', icon: CheckCircle2 },
                         { id: 'plan', label: 'Build Plan', icon: Sparkles },
+                        { id: 'simulate', label: 'Start Simulation', icon: Trophy, emoji: '🎭' },
                       ].map((m) => (
                         <button
                           key={m.id}
                           onClick={() => {
-                            m.id === 'plan' ? handleSend(undefined, '/plan') : startMode(m.id as Mode);
+                            if (m.id === 'plan') handleSend(undefined, '/plan');
+                            else if (m.id === 'simulate') setShowSimulationPicker(true);
+                            else startMode(m.id as Mode);
                             setIsHeaderDropdownOpen(false);
                           }}
                           className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-[11px] font-semibold uppercase tracking-wider text-zinc-600 hover:bg-zinc-50 transition-all"
                         >
-                          <m.icon size={14} />
+                          {m.emoji ? <span className="text-sm">{m.emoji}</span> : <m.icon size={14} />}
                           {m.label}
                         </button>
                       ))}
@@ -1019,11 +1352,13 @@ export default function App() {
                 className="absolute inset-0 flex flex-col items-center justify-center p-8 overflow-y-auto"
               >
                 <div className="w-32 h-32 rounded-full shimmer bg-zinc-200 mb-8 overflow-hidden border-4 border-white shadow-xl">
-                  <img 
-                    src="/vera-avatar.jpg" 
-                    alt="Vera Avatar" 
+                  <video 
+                    src="/vera-intro.mp4" 
+                    autoPlay 
+                    loop 
+                    muted 
+                    playsInline
                     className="w-full h-full object-cover object-top"
-                    onError={(e) => { e.currentTarget.style.display='none'; }}
                   />
                 </div>
                 <h3 className="text-3xl font-black tracking-tighter mb-2">Ready to start?</h3>
@@ -1057,9 +1392,23 @@ export default function App() {
                 animate={{ opacity: 1 }}
                 className="h-full flex flex-col"
               >
+                {mode === 'simulation' && activeSimulation && (
+                  <div className="bg-indigo-600 text-white px-6 py-3 flex items-center justify-between shadow-lg z-10">
+                    <div className="flex items-center gap-3">
+                      <span className="text-xl">🎭</span>
+                      <div>
+                        <h4 className="text-xs font-black uppercase tracking-wider leading-none mb-1">Simulation Active</h4>
+                        <p className="text-[11px] font-bold opacity-90">{activeSimulation.title}</p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <span className="text-[10px] font-bold bg-white/20 px-2 py-1 rounded uppercase">Type /end to stop</span>
+                    </div>
+                  </div>
+                )}
                 <div className="flex-1 overflow-y-auto p-8 space-y-8 scroll-smooth">
                   <div className="max-w-3xl mx-auto space-y-10">
-                    {messages.map((msg) => (
+                    {messages.map((msg, index) => (
                       <motion.div 
                         key={msg.id}
                         initial={{ opacity: 0, y: 10 }}
@@ -1071,12 +1420,23 @@ export default function App() {
                             {msg.role === 'user' ? (
                               <User size={18} />
                             ) : (
-                              <img 
-                                src="/vera-avatar.jpg" 
-                                alt="Vera Avatar" 
-                                className="w-full h-full object-cover object-top"
-                                onError={(e) => { e.currentTarget.style.display='none'; }}
-                              />
+                              <div className="relative">
+                                <img 
+                                  src="/vera-avatar.jpg" 
+                                  alt="Vera Avatar" 
+                                  className="w-full h-full object-cover object-top"
+                                  onError={(e) => { e.currentTarget.style.display='none'; }}
+                                />
+                                {isSpeaking && index === messages.length - 1 && (
+                                  <motion.div 
+                                    animate={{ scale: [1, 1.2, 1] }}
+                                    transition={{ repeat: Infinity, duration: 1 }}
+                                    className="absolute -top-1 -right-1 bg-indigo-500 text-white rounded-full p-0.5 shadow-sm"
+                                  >
+                                    <Volume2 size={8} />
+                                  </motion.div>
+                                )}
+                              </div>
                             )}
                           </div>
                           <div className="space-y-2">
@@ -1177,6 +1537,37 @@ export default function App() {
                 {/* Input Area */}
                 <div className="p-8 bg-gradient-to-t from-[#fafaf8] via-[#fafaf8] to-transparent">
                   <div className="max-w-3xl mx-auto">
+                    {isListening && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: 5 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="flex items-center justify-center gap-3 mb-4"
+                      >
+                        <div className="flex gap-1">
+                          {[0, 1, 2, 3, 4].map(i => (
+                            <motion.div
+                              key={i}
+                              animate={{ height: [8, 20, 8] }}
+                              transition={{ repeat: Infinity, duration: 0.5, delay: i * 0.1 }}
+                              className="w-1 bg-red-500 rounded-full"
+                            />
+                          ))}
+                        </div>
+                        <span className="text-xs font-bold text-red-500 uppercase tracking-widest">Listening... speak now</span>
+                      </motion.div>
+                    )}
+                    
+                    {isSpeaking && (
+                      <motion.div 
+                        initial={{ opacity: 0, y: 5 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        className="flex items-center justify-center gap-2 mb-4"
+                      >
+                        <Volume2 size={14} className="text-indigo-500 animate-pulse" />
+                        <span className="text-xs font-bold text-indigo-500 uppercase tracking-widest">Vera is speaking...</span>
+                      </motion.div>
+                    )}
+
                     {error && (
                       <motion.div 
                         initial={{ opacity: 0, y: 10 }}
@@ -1250,12 +1641,27 @@ export default function App() {
                         </AnimatePresence>
                       </div>
 
+                      {/* Microphone Button */}
+                      <button
+                        type="button"
+                        onClick={isListening ? stopListening : startListening}
+                        className={`w-10 h-10 rounded-full flex items-center justify-center transition-all shadow-sm ${
+                          isListening 
+                            ? 'bg-red-500 text-white animate-pulse' 
+                            : isSpeaking
+                              ? 'bg-indigo-50 text-indigo-500'
+                              : 'bg-white border border-zinc-200 text-zinc-400 hover:bg-zinc-50'
+                        }`}
+                      >
+                        {isListening ? <MicOff size={20} /> : isSpeaking ? <Volume2 size={20} className="animate-pulse" /> : <Mic size={20} />}
+                      </button>
+
                       <div className="relative flex-1">
                         <input 
                           type="text"
                           value={input}
                           onChange={(e) => setInput(e.target.value)}
-                          placeholder="Type a message or command..."
+                          placeholder={isListening ? "Listening..." : "Type a message or command..."}
                           className="w-full bg-white border border-zinc-200 rounded-2xl px-6 py-5 pr-16 text-sm focus:outline-none focus:border-zinc-900 focus:ring-1 focus:ring-zinc-900 transition-all shadow-lg"
                         />
                         <button 
@@ -1405,6 +1811,77 @@ export default function App() {
                 >
                   Close Report
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Simulation Picker Modal */}
+      <AnimatePresence>
+        {showSimulationPicker && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-[#fafaf8] overflow-y-auto">
+            <motion.div 
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: 20 }}
+              className="w-full max-w-6xl min-h-screen py-12 px-6"
+            >
+              <div className="flex items-center justify-between mb-12">
+                <div>
+                  <h2 className="text-5xl font-black tracking-tighter mb-2">Role-Play Simulations</h2>
+                  <p className="text-zinc-500 font-medium">Practice real-life situations with Vera acting as a character.</p>
+                </div>
+                <button 
+                  onClick={() => setShowSimulationPicker(false)}
+                  className="w-12 h-12 flex items-center justify-center bg-white border border-zinc-200 rounded-full hover:bg-zinc-50 transition-all shadow-sm"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {SIMULATIONS.map((sim) => (
+                  <button
+                    key={sim.id}
+                    onClick={() => startSimulation(sim)}
+                    className="group bg-white border border-zinc-200 rounded-[32px] p-8 text-left transition-all hover:shadow-2xl hover:-translate-y-1 flex flex-col h-full"
+                  >
+                    <div className="flex items-center justify-between mb-6">
+                      <div className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${
+                        sim.difficulty === 'beginner' ? 'bg-emerald-100 text-emerald-700' :
+                        sim.difficulty === 'intermediate' ? 'bg-blue-100 text-blue-700' :
+                        'bg-purple-100 text-purple-700'
+                      }`}>
+                        {sim.difficulty}
+                      </div>
+                      <div className="text-2xl">
+                        {sim.language === 'portuguese' ? '🇵🇹' : sim.language === 'spanish' ? '🇪🇸' : '🇬🇧'}
+                      </div>
+                    </div>
+                    
+                    <h3 className="text-xl font-black tracking-tighter mb-3 group-hover:text-indigo-600 transition-colors">{sim.title}</h3>
+                    <p className="text-sm text-zinc-500 leading-relaxed mb-8 flex-1">{sim.description}</p>
+                    
+                    <div className="space-y-4 mb-8">
+                      <div className="flex items-center gap-3 text-xs font-bold text-zinc-400 uppercase tracking-wider">
+                        <User size={14} />
+                        <span>Vera: {sim.veraRole.split(' ')[0]}...</span>
+                      </div>
+                      <div className="flex items-center gap-3 text-xs font-bold text-zinc-400 uppercase tracking-wider">
+                        <Briefcase size={14} />
+                        <span>You: {sim.userRole.split(' ')[0]}...</span>
+                      </div>
+                    </div>
+
+                    <div className="pt-6 border-t border-zinc-100 flex items-center justify-between group-hover:border-indigo-100 transition-colors">
+                      <span className="text-xs font-black uppercase tracking-widest text-zinc-400 group-hover:text-indigo-600 transition-colors">Start Simulation</span>
+                      <div className="w-10 h-10 rounded-full bg-zinc-50 flex items-center justify-center group-hover:bg-indigo-600 group-hover:text-white transition-all">
+                        <ChevronRight size={20} />
+                      </div>
+                    </div>
+                  </button>
+                ))}
               </div>
             </motion.div>
           </div>
