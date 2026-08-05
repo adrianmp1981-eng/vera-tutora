@@ -37,7 +37,11 @@ import {
   Layers,
   RotateCcw,
   Menu,
-  Smartphone
+  Smartphone,
+  TrendingUp,
+  TrendingDown,
+  Minus,
+  BarChart3
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -79,6 +83,20 @@ import {
   recordSessionCompleted,
   ModuleProgress
 } from './services/progressService';
+import {
+  recordError,
+  getErrorProfile,
+  ErrorPattern
+} from './services/errorProfileService';
+import {
+  recordSpokenTurn,
+  recordCorrection,
+  getSnapshots,
+  getTrend,
+  FluencySnapshot,
+  FluencyTrend
+} from './services/fluencyService';
+import { getFlashcards } from './services/flashcardService';
 
 const getStartOfWeek = () => {
   const now = new Date();
@@ -273,6 +291,14 @@ export default function App() {
   const [cardStats, setCardStats] = useState<FlashcardStats>(() => getFlashcardStats());
   const [progressData, setProgressData] = useState<Record<string, ModuleProgress>>(() => getProgress());
 
+  // Progress screen + fluency widget
+  const [showProgressModal, setShowProgressModal] = useState(false);
+  const [fluencyWeekWords, setFluencyWeekWords] = useState<number>(() =>
+    getSnapshots(7).reduce((a, s) => a + s.wordsSpoken, 0)
+  );
+  const [fluencyTrend, setFluencyTrend] = useState<FluencyTrend>(() => getTrend());
+  const voiceInputRef = useRef(false);
+
   // Mobile drawer + PWA install
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -288,6 +314,8 @@ export default function App() {
     setDailyState(getDailyState());
     setCardStats(getFlashcardStats());
     setProgressData(getProgress());
+    setFluencyWeekWords(getSnapshots(7).reduce((a, s) => a + s.wordsSpoken, 0));
+    setFluencyTrend(getTrend());
   };
 
   const countWords = (s: string) =>
@@ -663,6 +691,7 @@ export default function App() {
         const transcript = event.results[0][0].transcript;
         if (transcript) {
           setInput(transcript);
+          voiceInputRef.current = true; // this send came from the microphone
           // Small delay to allow state update to be visible before sending
           setTimeout(() => {
             handleSend(undefined, transcript);
@@ -726,6 +755,24 @@ export default function App() {
       }
     }
     out = out.replace(fcRegex, '');
+
+    // [ERROR]type|language|description|example|correction[/ERROR] — record a recurring-error pattern
+    const errRegex = /\[ERROR\]([\s\S]*?)\[\/ERROR\]/g;
+    while ((m = errRegex.exec(text)) !== null) {
+      const [type, language, description, example, correction] = m[1].split('|').map(s => s.trim());
+      if (description) {
+        recordError({
+          type: type || 'grammar',
+          language: language || 'none',
+          description,
+          example: example || '',
+          correction: correction || '',
+        });
+        recordCorrection();
+        touched = true;
+      }
+    }
+    out = out.replace(errRegex, '');
 
     // [REVIEW]cardId|quality[/REVIEW] — grade a reviewed card (daily Phase 1)
     const rvRegex = /\[REVIEW\]([\s\S]*?)\[\/REVIEW\]/g;
@@ -800,6 +847,18 @@ export default function App() {
       setInput('');
       return;
     }
+
+    // /progress opens the full-screen progress screen without contacting the model
+    if (messageText.trim().toLowerCase().startsWith('/progress')) {
+      setShowProgressModal(true);
+      setSidebarOpen(false);
+      setInput('');
+      return;
+    }
+
+    // Did this send come from the microphone? (used for fluency metrics)
+    const fromVoice = callMode || voiceInputRef.current;
+    voiceInputRef.current = false;
 
     // Count Adri's spoken words while the hands-free call is active (daily Phase 2)
     if (mode === 'daily' && callMode) {
@@ -1107,6 +1166,12 @@ export default function App() {
       setMessages(prev => [...prev, veraResponse]);
       speakText(veraResponse.text);
 
+      // Fluency metrics: record a spoken turn when the message came from the mic
+      if (fromVoice) {
+        recordSpokenTurn(countWords(messageText), countWords(responseText));
+        refreshDaily();
+      }
+
       // Memory Updates
       updateMemory({ lastSeen: new Date().toISOString() });
       if (newMessages.length % 15 === 0) {
@@ -1217,7 +1282,7 @@ export default function App() {
         <span>{value}%</span>
       </div>
       <div className="h-1 w-full bg-[#ffffff15] rounded-full overflow-hidden">
-        <motion.div 
+        <motion.div
           initial={{ width: 0 }}
           animate={{ width: `${value}%` }}
           className={`h-full ${color}`}
@@ -1225,6 +1290,21 @@ export default function App() {
       </div>
     </div>
   );
+
+  // Small trend indicator: green up / red down / gray flat, with a % change.
+  const TrendPill = ({ value, label }: { value: number; label?: string }) => {
+    const up = value > 0;
+    const down = value < 0;
+    const color = up ? 'text-emerald-400' : down ? 'text-red-400' : 'text-zinc-500';
+    const Icon = up ? TrendingUp : down ? TrendingDown : Minus;
+    return (
+      <span className={`inline-flex items-center gap-1 text-[11px] font-bold ${color}`}>
+        <Icon size={12} />
+        {value > 0 ? '+' : ''}{value}%
+        {label && <span className="text-zinc-500 font-medium ml-1">{label}</span>}
+      </span>
+    );
+  };
 
   const completeOnboarding = () => {
     const finalMemory = {
@@ -1544,6 +1624,24 @@ export default function App() {
                 <div className="mt-3 text-[11px] text-zinc-500 font-medium">All caught up ✓</div>
               )}
             </div>
+
+            {/* Fluency widget */}
+            <button
+              onClick={() => { closeSidebar(); setShowProgressModal(true); }}
+              className="w-full bg-zinc-900/50 rounded-2xl p-4 border border-zinc-800 text-left hover:border-zinc-700 transition-all"
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <TrendingUp size={16} className="text-emerald-400" />
+                <span className="text-[9px] uppercase tracking-widest text-zinc-500 font-bold">Fluency</span>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-3xl font-black tracking-tighter text-white">{fluencyWeekWords}</span>
+                <span className="text-[11px] text-zinc-400 font-medium">words this week</span>
+              </div>
+              <div className="mt-1">
+                <TrendPill value={fluencyTrend.wordsChange} label="vs last week" />
+              </div>
+            </button>
           </div>
 
           {studyPlan && (
@@ -2052,6 +2150,7 @@ export default function App() {
                                 {[
                                   { id: 'daily', label: 'Daily session', icon: '🔥', cmd: '/daily' },
                                   { id: 'review', label: 'Review flashcards', icon: '🃏', cmd: '/review' },
+                                  { id: 'progress', label: 'My progress', icon: '📈', cmd: '/progress' },
                                   { id: 'explain', label: 'Explain it back (Feynman)', icon: '🧠', cmd: '/explain' },
                                   { id: 'case', label: 'Real-world case', icon: '📋', cmd: '/case' },
                                   { id: 'shadow', label: 'Shadowing practice', icon: '🎙️', cmd: '/shadow' },
@@ -2473,6 +2572,233 @@ export default function App() {
                 )}
               </div>
             )}
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Progress Screen Modal */}
+      <AnimatePresence>
+        {showProgressModal && (
+          <div className="fixed inset-0 z-[100] bg-[#fafaf8] overflow-y-auto">
+            {(() => {
+              // ---- Compute all data for the screen ----
+              const dayKey = (d: Date) => {
+                const y = d.getFullYear();
+                const mm = String(d.getMonth() + 1).padStart(2, '0');
+                const dd = String(d.getDate()).padStart(2, '0');
+                return `${y}-${mm}-${dd}`;
+              };
+              const snaps = getSnapshots(60);
+              const byDate: Record<string, FluencySnapshot> = {};
+              snaps.forEach((s) => { byDate[s.date] = s; });
+              const series: { date: string; value: number }[] = [];
+              for (let i = 13; i >= 0; i--) {
+                const d = new Date();
+                d.setDate(d.getDate() - i);
+                const key = dayKey(d);
+                series.push({ date: key, value: byDate[key]?.wordsSpoken || 0 });
+              }
+              const last7 = series.slice(-7).map((p) => byDate[p.date]).filter(Boolean) as FluencySnapshot[];
+              const weekWords = last7.reduce((a, s) => a + s.wordsSpoken, 0);
+              const weekTurns = last7.reduce((a, s) => a + s.turnsSpoken, 0);
+              const avgTurn = weekTurns ? Math.round(weekWords / weekTurns) : 0;
+              const weekVera = last7.reduce((a, s) => a + s.veraWords, 0);
+              const ratio = weekWords + weekVera > 0 ? Math.round((weekWords / (weekWords + weekVera)) * 100) : 0;
+              const trend = getTrend();
+
+              // SVG chart geometry
+              const W = 600, H = 140, PAD = 8;
+              const maxV = Math.max(1, ...series.map((p) => p.value));
+              const pts = series.map((p, i) => {
+                const x = PAD + (i / (series.length - 1)) * (W - 2 * PAD);
+                const y = H - PAD - (p.value / maxV) * (H - 2 * PAD);
+                return { x, y, ...p };
+              });
+              const linePts = pts.map((p) => `${p.x},${p.y}`).join(' ');
+              const areaPts = `${PAD},${H - PAD} ${linePts} ${W - PAD},${H - PAD}`;
+
+              // Errors
+              const profile = getErrorProfile();
+              const activeErrors = profile.filter((p) => p.status !== 'resolved').sort((a, b) => b.occurrences - a.occurrences);
+              const resolvedErrors = profile.filter((p) => p.status === 'resolved').sort((a, b) => b.occurrences - a.occurrences);
+              const typeColors: Record<string, string> = {
+                grammar: 'bg-blue-100 text-blue-700',
+                vocabulary: 'bg-emerald-100 text-emerald-700',
+                calque: 'bg-red-100 text-red-700',
+                pronunciation: 'bg-purple-100 text-purple-700',
+                structure: 'bg-amber-100 text-amber-700',
+                concept: 'bg-teal-100 text-teal-700',
+              };
+              const statusColors: Record<string, string> = {
+                active: 'bg-red-100 text-red-600',
+                improving: 'bg-amber-100 text-amber-600',
+                resolved: 'bg-emerald-100 text-emerald-600',
+              };
+
+              // Knowledge
+              const cards = getFlashcards();
+              const catAgg: Record<string, { total: number; mastered: number }> = {};
+              let chunks = 0, terms = 0;
+              cards.forEach((c) => {
+                catAgg[c.category] = catAgg[c.category] || { total: 0, mastered: 0 };
+                catAgg[c.category].total += 1;
+                if (c.mastered || c.interval > 21) catAgg[c.category].mastered += 1;
+                if (c.cardType === 'chunk') chunks += 1;
+                else if (c.cardType === 'term') terms += 1;
+              });
+              const cats = Object.entries(catAgg).sort((a, b) => b[1].total - a[1].total);
+
+              const ErrorRow = ({ p, active }: { p: ErrorPattern; active: boolean }) => (
+                <div className="bg-white border border-zinc-200 rounded-2xl p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest ${typeColors[p.type] || 'bg-zinc-100 text-zinc-600'}`}>{p.type}</span>
+                        <span className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest ${statusColors[p.status]}`}>{p.status}</span>
+                        <span className="text-[10px] font-bold text-zinc-400">{p.occurrences}×</span>
+                      </div>
+                      <div className="text-sm font-semibold text-zinc-800">{p.description}</div>
+                      {(p.example || p.correction) && (
+                        <div className="text-[11px] text-zinc-500 mt-1">
+                          <span className="line-through decoration-red-300">{p.example}</span>
+                          {p.correction && <span className="text-emerald-600 font-medium"> → {p.correction}</span>}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  {active && (
+                    <button
+                      onClick={() => { setShowProgressModal(false); handleSend(undefined, `/english Let's drill this specific mistake: ${p.description}`); }}
+                      className="mt-3 px-3 py-2 min-h-[40px] rounded-xl text-[11px] font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-all"
+                    >
+                      Practicar este error
+                    </button>
+                  )}
+                </div>
+              );
+
+              return (
+                <motion.div
+                  initial={{ opacity: 0, y: 16 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 16 }}
+                  className="max-w-4xl mx-auto px-4 md:px-8 py-10"
+                >
+                  {/* Header */}
+                  <div className="flex items-center justify-between mb-10">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2 bg-zinc-900 text-white rounded-xl"><BarChart3 size={22} /></div>
+                      <h2 className="text-3xl md:text-4xl font-black tracking-tighter">My Progress</h2>
+                    </div>
+                    <button
+                      onClick={() => setShowProgressModal(false)}
+                      className="w-11 h-11 flex items-center justify-center bg-white border border-zinc-200 rounded-full hover:bg-zinc-50 transition-all shadow-sm"
+                    >
+                      <X size={22} />
+                    </button>
+                  </div>
+
+                  {/* BLOCK 1 — Fluency */}
+                  <section className="mb-12">
+                    <h3 className="text-xs font-black uppercase tracking-widest text-zinc-400 mb-4">Fluency</h3>
+                    <div className="bg-white border border-zinc-200 rounded-3xl p-6 shadow-sm">
+                      <div className="text-[10px] font-bold uppercase tracking-widest text-zinc-400 mb-2">Words spoken · last 14 days</div>
+                      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-32" preserveAspectRatio="none">
+                        <polygon points={areaPts} fill="rgba(99,102,241,0.10)" />
+                        <polyline points={linePts} fill="none" stroke="#6366f1" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+                        {pts.map((p, i) => (
+                          <circle key={i} cx={p.x} cy={p.y} r={2.5} fill="#6366f1" />
+                        ))}
+                      </svg>
+
+                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mt-6">
+                        <div className="bg-zinc-50 rounded-2xl p-4">
+                          <div className="text-3xl font-black tracking-tighter text-zinc-900">{weekWords}</div>
+                          <div className="text-[11px] text-zinc-500 font-medium mb-1">words this week</div>
+                          <TrendPill value={trend.wordsChange} />
+                        </div>
+                        <div className="bg-zinc-50 rounded-2xl p-4">
+                          <div className="text-3xl font-black tracking-tighter text-zinc-900">{avgTurn}</div>
+                          <div className="text-[11px] text-zinc-500 font-medium mb-1">avg words / turn</div>
+                          <TrendPill value={trend.turnLengthChange} />
+                        </div>
+                        <div className="bg-zinc-50 rounded-2xl p-4">
+                          <div className="text-3xl font-black tracking-tighter text-zinc-900">{ratio}%</div>
+                          <div className="text-[11px] text-zinc-500 font-medium mb-1">you vs Vera</div>
+                          <TrendPill value={trend.ratioChange} />
+                        </div>
+                      </div>
+
+                      {ratio > 0 && ratio < 40 && (
+                        <div className="mt-4 flex items-center gap-2 bg-amber-50 border border-amber-200 text-amber-700 rounded-xl px-4 py-3 text-sm font-medium">
+                          <Info size={16} />
+                          Vera habla más que tú. Intenta responder con frases más largas.
+                        </div>
+                      )}
+                    </div>
+                  </section>
+
+                  {/* BLOCK 2 — Recurring errors */}
+                  <section className="mb-12">
+                    <h3 className="text-xs font-black uppercase tracking-widest text-zinc-400 mb-4">Tus errores recurrentes</h3>
+                    {activeErrors.length === 0 ? (
+                      <div className="text-sm text-zinc-500">Aún no hay errores registrados. Vera los irá detectando a medida que practiquéis.</div>
+                    ) : (
+                      <div className="space-y-3">
+                        {activeErrors.map((p) => <ErrorRow key={p.id} p={p} active />)}
+                      </div>
+                    )}
+
+                    {resolvedErrors.length > 0 && (
+                      <details className="mt-4 group">
+                        <summary className="cursor-pointer text-[11px] font-bold uppercase tracking-widest text-emerald-600 flex items-center gap-2">
+                          <ChevronRight size={14} className="group-open:rotate-90 transition-transform" />
+                          Superados ({resolvedErrors.length})
+                        </summary>
+                        <div className="space-y-3 mt-3">
+                          {resolvedErrors.map((p) => <ErrorRow key={p.id} p={p} active={false} />)}
+                        </div>
+                      </details>
+                    )}
+                  </section>
+
+                  {/* BLOCK 3 — Knowledge */}
+                  <section className="mb-8">
+                    <h3 className="text-xs font-black uppercase tracking-widest text-zinc-400 mb-4">Conocimiento</h3>
+                    <div className="bg-white border border-zinc-200 rounded-3xl p-6 shadow-sm">
+                      <div className="flex items-center gap-6 mb-6">
+                        <div>
+                          <div className="text-2xl font-black tracking-tighter text-blue-600">{chunks}</div>
+                          <div className="text-[11px] text-zinc-500 font-medium">chunks learned</div>
+                        </div>
+                        <div className="text-zinc-300 font-black text-xl">vs</div>
+                        <div>
+                          <div className="text-2xl font-black tracking-tighter text-zinc-700">{terms}</div>
+                          <div className="text-[11px] text-zinc-500 font-medium">single terms</div>
+                        </div>
+                      </div>
+                      {cats.length === 0 ? (
+                        <div className="text-sm text-zinc-500">Aún no hay cartas. Vera las creará mientras enseña.</div>
+                      ) : (
+                        <div className="space-y-3">
+                          {cats.map(([cat, agg]) => (
+                            <div key={cat} className="space-y-1">
+                              <div className="flex justify-between text-[11px] font-bold uppercase tracking-tighter text-zinc-500">
+                                <span>{cat}</span>
+                                <span>{agg.mastered} / {agg.total} mastered</span>
+                              </div>
+                              <div className="h-1.5 w-full bg-zinc-100 rounded-full overflow-hidden">
+                                <div className="h-full bg-emerald-500" style={{ width: `${agg.total ? (agg.mastered / agg.total) * 100 : 0}%` }} />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </section>
+                </motion.div>
+              );
+            })()}
           </div>
         )}
       </AnimatePresence>

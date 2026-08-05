@@ -3,6 +3,7 @@ import { Message, Mode, UserMemory, Simulation } from "../types";
 import { getMemory } from "./memoryService";
 import { getDueCards } from "./flashcardService";
 import { getStreak } from "./dailySessionService";
+import { getTopErrors } from "./errorProfileService";
 
 const PORTRAIT_CACHE_KEY = "vera_portrait_b64";
 
@@ -299,6 +300,17 @@ FORCED PRODUCTION — always make Adri attempt BEFORE you give the answer. What 
 - Wait for his attempt in his next message. Only then give the correct answer and explain the gap.
 - Never front-load the answer. The attempt comes first, always.`;
 
+const ERROR_PROFILE_INSTRUCTION = `ERROR PROFILE — you are building a map of Adri's specific weak points over time. This is what makes you different from every course he has tried.
+Whenever you correct a mistake he makes, emit an error tag at the end of your message:
+[ERROR]type|language|description|example|correction[/ERROR]
+- type: grammar, vocabulary, calque, pronunciation, structure, concept
+- language: english, portuguese, spanish, none (use 'none' for professional concept errors)
+- description: the PATTERN, not the instance. Write 'omits the definite article before abstract nouns', not 'said business instead of the business'. This is what lets you track it across weeks.
+- example: what he actually said
+- correction: what he should have said
+Only emit this for real mistakes, not slips. One tag per distinct pattern per message.
+Use the profile actively: if he repeats a pattern you have seen before, say so explicitly ('this is the third time this week you drop the article — let's drill it'). Bring recurring errors into practice deliberately.`;
+
 const FEYNMAN_MODE = `FEYNMAN MODE — Adri is going to explain a concept back to you as if teaching it to someone else. This is how he finds the holes in his own understanding.
 1. Ask him to pick a concept he thinks he knows (or suggest one from his weakest area based on his progress).
 2. Ask him to explain it in simple terms, as if to someone with no background. If the concept is professional (Incoterms, supply chain, football tactics), ask him to explain it IN ENGLISH — he practices both at once.
@@ -452,6 +464,17 @@ RULES FOR THIS SIMULATION:
   base += "\n\nWhen you decide a visual would help, include it in your response using this format:\n[VISUAL_START]\n\n your HTML/SVG visual here \n\n[VISUAL_END]\nThen continue with your text explanation after the visual block.";
 
   base += `\n\n${FLASHCARD_INSTRUCTION}`;
+
+  base += `\n\n${ERROR_PROFILE_INSTRUCTION}`;
+
+  // Inject Adri's 5 most frequent active error patterns so Vera keeps them in mind.
+  const topErrors = getTopErrors(5);
+  if (topErrors.length) {
+    base += `\n\nADRI'S TOP RECURRING ERRORS (watch for these and correct them when they appear; call out repeats):\n` +
+      topErrors
+        .map((e) => `- [${e.type}/${e.language}] ${e.description} (seen ${e.occurrences}x) — e.g. "${e.example}" → "${e.correction}"`)
+        .join('\n');
+  }
 
   if (!memory) return base;
 
