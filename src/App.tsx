@@ -97,6 +97,7 @@ import {
   FluencyTrend
 } from './services/fluencyService';
 import { getFlashcards } from './services/flashcardService';
+import AccessGate from './components/AccessGate';
 
 const getStartOfWeek = () => {
   const now = new Date();
@@ -299,6 +300,9 @@ export default function App() {
   const [fluencyTrend, setFluencyTrend] = useState<FluencyTrend>(() => getTrend());
   const voiceInputRef = useRef(false);
 
+  // Access gate (PIN)
+  const [hasAccess, setHasAccess] = useState(() => !!localStorage.getItem('vera_access_code'));
+
   // Mobile drawer + PWA install
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
@@ -420,6 +424,8 @@ export default function App() {
   }, [weeklyStats.weekStart]);
 
   useEffect(() => {
+    // Wait until the user is past the access gate before contacting the API.
+    if (!hasAccess) return;
     // Vera takes the initiative for returning users with a concrete proposal
     if (hasMemory() && messages.length === 0) {
       const mem = getMemory();
@@ -432,7 +438,7 @@ export default function App() {
         openWithProposal();
       }
     }
-  }, []);
+  }, [hasAccess]);
 
   // Capture the PWA install prompt so we can trigger it from our own button.
   useEffect(() => {
@@ -1318,6 +1324,11 @@ export default function App() {
     setIsWelcomeScreen(true);
   };
 
+  // Access gate: lock the whole app behind a PIN until a code is stored.
+  if (!hasAccess) {
+    return <AccessGate onSuccess={() => setHasAccess(true)} />;
+  }
+
   if (!memory && onboardingStep > 0) {
     return (
       <div className="flex h-screen bg-[#1a1a2e] text-white font-sans items-center justify-center p-8">
@@ -1758,6 +1769,15 @@ export default function App() {
           >
             <PlusCircle size={18} />
             New Session
+          </button>
+          <button
+            onClick={() => {
+              localStorage.removeItem('vera_access_code');
+              window.location.reload();
+            }}
+            className="w-full text-center py-2 text-[11px] font-medium text-zinc-500 hover:text-zinc-300 transition-colors"
+          >
+            Cerrar sesión
           </button>
         </div>
       </aside>

@@ -30,7 +30,17 @@ it can't be read from the browser devtools.
   bundle. Use plain `GEMINI_API_KEY`.
 - On Vercel, add `GEMINI_API_KEY` under Project Settings → Environment Variables.
 - The proxy also enforces a simple origin check and an in-memory rate limit
-  (20 requests/min per IP) to deter casual abuse.
+  (20 requests/min per person) to deter casual abuse.
+
+### Per-person access codes
+
+The app is private and gated by a PIN. Set `ACCESS_CODES` (server-side) to a
+comma-separated list of `name:code` pairs, e.g.
+`ACCESS_CODES="adri:4821,maria:7734,carlos:9156"`. Each person enters their own
+code on the access screen; the server validates it via the `x-access-code`
+header and rate-limits each person independently. **Removing someone's entry
+revokes their access on the next deployment.** If `ACCESS_CODES` is unset, the
+API allows all requests (convenient for local development).
 
 > Note: `api/gemini.ts` needs a serverless host (Vercel). `npm run dev` serves
 > the static client; run it on Vercel (or `vercel dev`) to exercise the proxy.

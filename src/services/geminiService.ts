@@ -516,14 +516,25 @@ export interface GeminiRequest {
  * rest of this file relies on.
  */
 async function callGemini(payload: GeminiRequest): Promise<any> {
+  const accessCode = typeof localStorage !== 'undefined' ? localStorage.getItem('vera_access_code') || '' : '';
   const res = await fetch('/api/gemini', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-access-code': accessCode,
+    },
     body: JSON.stringify(payload),
   });
 
   let data: any = null;
   try { data = await res.json(); } catch { data = null; }
+
+  // Access revoked (or code invalid): clear it and reload back to the access gate.
+  if (res.status === 401 && data?.error === 'UNAUTHORIZED') {
+    try { localStorage.removeItem('vera_access_code'); } catch {}
+    if (typeof window !== 'undefined') window.location.reload();
+    throw new Error('Acceso no autorizado.');
+  }
 
   if (!res.ok) {
     const isOwnRateLimit = data?.error === 'RATE_LIMIT';
