@@ -5,8 +5,8 @@ import { getMemory } from "./memoryService";
 const PORTRAIT_CACHE_KEY = "vera_portrait_b64";
 
 const MODELS = {
-  chat:    "gemini-2.0-flash",
-  summary: "gemini-3-flash-preview",
+  chat:    "gemini-flash-latest",
+  summary: "gemini-flash-lite-latest",
   image:   "imagen-3.0-generate-002",
 };
 
@@ -401,7 +401,7 @@ export async function searchResources(query: string): Promise<string> {
   const ai = getAI();
   try {
     const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
+      model: "gemini-flash-latest",
       contents: [{ parts: [{ text: `Search for the best current resources for: "${query}". 
       Include: book titles with authors, free online resources with URLs, YouTube channels, podcasts, apps, and official exam information. 
       Focus on European Portuguese (Portugal), not Brazilian. 
