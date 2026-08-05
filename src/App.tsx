@@ -1268,72 +1268,72 @@ export default function App() {
         className="w-[260px] h-screen bg-[#1a1a2e] text-white flex flex-col shrink-0 z-20 shadow-2xl border-r border-[#ffffff10]"
         style={{ background: 'linear-gradient(180deg, #1a1a2e 0%, #16213e 100%)' }}
       >
-        {/* Fixed zone (does not scroll): Daily session, video, status, call, title, badge */}
-        <div className="px-8 pt-8 pb-4 flex flex-col items-center text-center flex-shrink-0">
-          {/* Daily session — top of the sidebar, with streak badge */}
-          <button
-            onClick={() => handleSend(undefined, '/daily')}
-            className="w-full flex items-center justify-between gap-2 px-4 py-[12px] mb-6 text-white rounded-[14px] transition-all text-[13px] font-semibold shadow-[0_4px_15px_rgba(99,102,241,0.4)] hover:scale-[1.02] hover:brightness-110"
-            style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}
-          >
-            <span className="flex items-center gap-2">
-              <Flame size={18} />
-              Daily session
-            </span>
-            <span className="flex items-center gap-1 bg-black/25 rounded-full px-2 py-0.5 text-[11px] font-bold">
-              🔥 {dailyState.streak}
-            </span>
-          </button>
+        {/* Fixed zone (does not scroll): identity row + action buttons */}
+        <div className="px-5 pt-5 pb-3 flex flex-col flex-shrink-0 gap-4">
+          {/* Identity row: circular avatar + name / tutor / status */}
+          <div className="flex items-center gap-3">
+            {/* Circular live video avatar */}
+            <div
+              className={`relative overflow-hidden bg-zinc-900 shrink-0 transition-all duration-300 ${isSpeaking ? 'vera-ring-pulse' : ''}`}
+              style={{ width: 110, height: 110, borderRadius: '50%' }}
+            >
+              {/* Base layer: still portrait, always visible */}
+              <img
+                src="/vera-avatar.jpg"
+                alt="Vera Avatar"
+                className="absolute inset-0 w-full h-full object-cover object-top"
+                onError={(e) => { e.currentTarget.style.display='none'; }}
+              />
+              {/* Top layer: video, fades in while speaking */}
+              <video
+                ref={videoRef}
+                src="/Vera_720p.mp4"
+                muted
+                playsInline
+                loop
+                preload="auto"
+                className="absolute inset-0 w-full h-full object-cover object-top transition-opacity duration-300"
+                style={{ opacity: isSpeaking ? 1 : 0 }}
+              />
+            </div>
 
-          {/* Live video panel */}
-          <div
-            className={`relative mb-4 overflow-hidden bg-zinc-900 transition-all duration-300 ${isSpeaking ? 'vera-ring-pulse' : ''}`}
-            style={{ width: 200, height: 220, borderRadius: 16 }}
-          >
-            {/* Base layer: still portrait, always visible */}
-            <img
-              src="/vera-avatar.jpg"
-              alt="Vera Avatar"
-              className="absolute inset-0 w-full h-full object-cover object-top"
-              onError={(e) => { e.currentTarget.style.display='none'; }}
-            />
-            {/* Top layer: video, fades in while speaking */}
-            <video
-              ref={videoRef}
-              src="/Vera_720p.mp4"
-              muted
-              playsInline
-              loop
-              preload="auto"
-              className="absolute inset-0 w-full h-full object-cover object-top transition-opacity duration-300"
-              style={{ opacity: isSpeaking ? 1 : 0 }}
-            />
+            {/* Name + tutor + live status */}
+            <div className="flex flex-col items-start text-left min-w-0">
+              <h1 className="text-[16px] font-black tracking-tighter leading-none">VERA</h1>
+              <p className="text-[9px] uppercase tracking-widest font-bold text-zinc-500 mt-1">Personal Tutor</p>
+              <div className="flex items-center gap-2 mt-2">
+                {(() => {
+                  const status = isListening
+                    ? { color: 'bg-emerald-500', pulse: true, label: 'Listening...' }
+                    : isSpeaking
+                    ? { color: 'bg-indigo-500', pulse: true, label: 'Speaking' }
+                    : isLoading
+                    ? { color: 'bg-amber-500', pulse: true, label: 'Thinking...' }
+                    : { color: 'bg-zinc-500', pulse: false, label: 'Online' };
+                  return (
+                    <>
+                      <span
+                        className={`rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`}
+                        style={{ width: 8, height: 8 }}
+                      />
+                      <span className="text-[11px] font-medium text-zinc-300">{status.label}</span>
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
           </div>
 
-          {/* Live status indicator */}
-          <div className="flex items-center gap-2 mb-6">
-            {(() => {
-              const status = isListening
-                ? { color: 'bg-emerald-500', pulse: true, label: 'Listening...' }
-                : isSpeaking
-                ? { color: 'bg-indigo-500', pulse: true, label: 'Speaking' }
-                : isLoading
-                ? { color: 'bg-amber-500', pulse: true, label: 'Thinking...' }
-                : { color: 'bg-zinc-500', pulse: false, label: 'Online' };
-              return (
-                <>
-                  <span
-                    className={`rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`}
-                    style={{ width: 8, height: 8 }}
-                  />
-                  <span className="text-[12px] font-medium text-zinc-300">{status.label}</span>
-                </>
-              );
-            })()}
-          </div>
-
-          {/* Call mode button */}
-          <div className="w-full px-2 mb-6">
+          {/* Action buttons row: Daily session + Start/End call */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => handleSend(undefined, '/daily')}
+              className="w-1/2 flex items-center justify-center gap-1.5 px-2 py-2 text-white rounded-[12px] transition-all text-[11px] font-semibold shadow-[0_4px_15px_rgba(99,102,241,0.4)] hover:brightness-110"
+              style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}
+            >
+              <span className="whitespace-nowrap">Daily session</span>
+              <span className="text-[10px] font-bold whitespace-nowrap">🔥{dailyState.streak}</span>
+            </button>
             <button
               onClick={() => {
                 if (callMode) {
@@ -1344,25 +1344,20 @@ export default function App() {
                   startListening();
                 }
               }}
-              className="w-full flex items-center justify-center gap-3 px-4 py-[12px] text-white rounded-[14px] transition-all text-[13px] font-semibold hover:scale-[1.02] hover:brightness-110"
+              className="w-1/2 flex items-center justify-center gap-1.5 px-2 py-2 text-white rounded-[12px] transition-all text-[11px] font-semibold hover:brightness-110"
               style={callMode
                 ? { background: 'linear-gradient(135deg, #ef4444, #dc2626)', boxShadow: '0 4px 15px rgba(239,68,68,0.4)' }
                 : { background: 'linear-gradient(135deg, #6366f1, #8b5cf6)', boxShadow: '0 4px 15px rgba(99,102,241,0.4)' }
               }
             >
-              {callMode ? <MicOff size={18} /> : <Mic size={18} />}
-              {callMode ? 'End call' : 'Start call'}
+              {callMode ? <MicOff size={14} /> : <Mic size={14} />}
+              <span className="whitespace-nowrap">{callMode ? 'End call' : 'Start call'}</span>
             </button>
           </div>
-
-          <h1 className="text-xl font-black tracking-tighter mb-1">VERA</h1>
-          <p className="text-[10px] uppercase tracking-[0.3em] font-bold text-zinc-500 mb-6">Personal Tutor</p>
-
-          <ModeBadge currentMode={mode} className="mb-2" />
         </div>
 
         {/* Scroll zone: progress bars, streak/flashcards cards, study plan, report, about */}
-        <div className="flex-1 overflow-y-auto px-8 pt-4 pb-6 flex flex-col items-center text-center">
+        <div className="flex-1 overflow-y-auto px-5 pt-4 pb-6 flex flex-col items-center text-center">
           <div className="w-full space-y-4 px-2">
             <ProgressBar label="English" value={progress.english} color="bg-blue-500" />
             <ProgressBar label="Habits" value={progress.habits} color="bg-amber-500" />
