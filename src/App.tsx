@@ -99,6 +99,16 @@ import {
 import { getFlashcards } from './services/flashcardService';
 import AccessGate from './components/AccessGate';
 
+// Preferred modern "Online (Natural)" female voices per language, in priority order.
+const PREFERRED_VOICES: Record<string, string[]> = {
+  'en-US': ['Aria', 'Jenny', 'Ava', 'Emma'],
+  'es-ES': ['Elvira', 'Ximena'],
+  'pt-PT': ['Raquel', 'Fernanda'],
+};
+
+// Old robotic Windows/legacy voices to avoid as a last resort.
+const OLD_VOICE_NAMES = ['Zira', 'David', 'Mark', 'Helena', 'Laura', 'Pablo', 'Helia', 'Hazel', 'George', 'Sabina', 'Raul'];
+
 const getStartOfWeek = () => {
   const now = new Date();
   const day = now.getDay();
@@ -573,44 +583,33 @@ export default function App() {
     }
   }, [isSpeaking]);
 
+  // Pick the best voice for a language, strongly preferring modern
+  // "Online (Natural)" voices over the old robotic ones (Zira, David, Helena...).
   const getVoice = (lang: string): SpeechSynthesisVoice | null => {
     const voices = window.speechSynthesis.getVoices();
-    
-    if (lang === 'en-US') {
-      // Try these specific American voices in order of preference
-      const preferred = [
-        'Microsoft Aria Online (Natural) - English (United States)',
-        'Microsoft Jenny Online (Natural) - English (United States)', 
-        'Microsoft Guy Online (Natural) - English (United States)',
-        'Google US English',
-        'Samantha',
-        'Karen',
-        'Victoria',
-      ];
-      for (const name of preferred) {
-        const v = voices.find(v => v.name === name);
-        if (v) return v;
-      }
-      // Fallback: any en-US voice that is NOT from a Russian/Eastern European locale
-      return voices.find(v => 
-        v.lang === 'en-US' && 
-        !v.name.includes('Russian') && 
-        !v.name.includes('Pavel') &&
-        !v.name.includes('Irina') &&
-        !v.name.includes('ru-')
-      ) || voices.find(v => v.lang === 'en-US') || null;
+    const prefix = lang.split('-')[0];
+    const preferred = PREFERRED_VOICES[lang] || [];
+
+    // 1. Exact language + "Natural" + one of the preferred female names, in order.
+    for (const name of preferred) {
+      const v = voices.find(v => v.lang === lang && v.name.includes('Natural') && v.name.includes(name));
+      if (v) return v;
     }
-    
-    if (lang === 'pt-PT') {
-      return voices.find(v => v.lang === 'pt-PT') || 
-             voices.find(v => v.lang.startsWith('pt')) || null;
-    }
-    
-    if (lang === 'es-ES') {
-      return voices.find(v => v.lang === 'es-ES') || 
-             voices.find(v => v.lang.startsWith('es')) || null;
-    }
-    
+
+    // 2. Any exact-language voice whose name contains "Natural".
+    const naturalExact = voices.find(v => v.lang === lang && v.name.includes('Natural'));
+    if (naturalExact) return naturalExact;
+
+    // 3. Any voice with the same language prefix that contains "Natural".
+    const naturalPrefix = voices.find(v => v.lang.startsWith(prefix) && v.name.includes('Natural'));
+    if (naturalPrefix) return naturalPrefix;
+
+    // 4. Last resort: any exact-language voice that is NOT a known old/robotic one.
+    const nonLegacy = voices.find(
+      v => v.lang === lang && !OLD_VOICE_NAMES.some(old => v.name.includes(old))
+    );
+    if (nonLegacy) return nonLegacy;
+
     return null;
   };
 
@@ -619,13 +618,19 @@ export default function App() {
     if (!window.speechSynthesis) return;
 
     window.speechSynthesis.cancel();
-    await new Promise(resolve => {
+    // Wait until the voice list is populated (voices load asynchronously).
+    await new Promise<void>(resolve => {
       if (window.speechSynthesis.getVoices().length > 0) {
-        resolve(null);
+        resolve();
       } else {
-        window.speechSynthesis.onvoiceschanged = () => resolve(null);
+        window.speechSynthesis.onvoiceschanged = () => resolve();
       }
     });
+    // Cloud "Online (Natural)" voices arrive late. A short list (< 50) means the
+    // full set hasn't loaded yet, so give it a moment before choosing.
+    if (window.speechSynthesis.getVoices().length < 50) {
+      await new Promise(r => setTimeout(r, 700));
+    }
 
     // Clean markdown from text
     const cleanText = text
@@ -649,6 +654,7 @@ export default function App() {
     }
 
     const selectedVoice = getVoice(utterance.lang);
+    console.log('[Vera voice]', selectedVoice?.name || 'ninguna');
     if (selectedVoice) utterance.voice = selectedVoice;
 
     utterance.rate = 0.95;
