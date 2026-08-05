@@ -657,8 +657,9 @@ export default function App() {
     console.log('[Vera voice]', selectedVoice?.name || 'ninguna');
     if (selectedVoice) utterance.voice = selectedVoice;
 
-    utterance.rate = 0.95;
-    utterance.pitch = 1.05;
+    // Las voces "Online (Natural)" de Edge son de nube y no admiten rate/pitch:
+    // al modificarlos, el navegador cae silenciosamente al motor local robótico.
+    // No reintroducir estas propiedades.
     utterance.volume = 1;
 
     utterance.onstart = () => setIsSpeaking(true);
