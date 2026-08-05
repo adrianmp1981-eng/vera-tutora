@@ -233,7 +233,10 @@ export default function App() {
     const saved = localStorage.getItem('vera_voice_enabled');
     return saved !== null ? saved === 'true' : true;
   });
+  const [callMode, setCallMode] = useState(false);
+  const callModeRef = useRef(false);
   const recognitionRef = useRef<any>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
 
   const [studyPlan, setStudyPlan] = useState<string | null>(() => {
     return localStorage.getItem('vera_study_plan');
@@ -397,6 +400,23 @@ export default function App() {
     setIsSpeaking(false);
   };
 
+  // Keep the ref in sync so async callbacks (utterance.onend) read the latest value
+  useEffect(() => {
+    callModeRef.current = callMode;
+  }, [callMode]);
+
+  // Live-video effect: play & show the clip while Vera is speaking, reset otherwise
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (isSpeaking) {
+      video.play().catch(() => {});
+    } else {
+      video.pause();
+      video.currentTime = 0;
+    }
+  }, [isSpeaking]);
+
   const getVoice = (lang: string): SpeechSynthesisVoice | null => {
     const voices = window.speechSynthesis.getVoices();
     
@@ -480,7 +500,13 @@ export default function App() {
     utterance.volume = 1;
 
     utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
+    utterance.onend = () => {
+      setIsSpeaking(false);
+      // Hands-free call mode: after Vera finishes, listen again automatically
+      if (callModeRef.current) {
+        setTimeout(() => startListening(), 500);
+      }
+    };
     utterance.onerror = () => setIsSpeaking(false);
 
     window.speechSynthesis.speak(utterance);
@@ -1106,23 +1132,79 @@ export default function App() {
         style={{ background: 'linear-gradient(180deg, #1a1a2e 0%, #16213e 100%)' }}
       >
         <div className="p-8 flex flex-col items-center text-center">
-          <div className="relative group mb-6">
-            <div className={`w-36 h-36 rounded-full border-4 ${isSpeaking ? 'border-indigo-500 shadow-[0_0_20px_rgba(99,102,241,0.5)]' : 'border-zinc-800'} p-1 relative overflow-hidden bg-zinc-900 flex items-center justify-center transition-all duration-500`}>
-              <img 
-                src="/vera-avatar.jpg" 
-                alt="Vera Avatar" 
-                className="w-full h-full rounded-full object-cover object-top"
-                onError={(e) => { e.currentTarget.style.display='none'; }}
-              />
-            </div>
-            <div className="absolute -bottom-2 left-1/2 -translate-x-1/2">
-              <span className="w-3 h-3 rounded-full bg-emerald-500 border-2 border-[#1a1a2e] block" />
-            </div>
+          {/* Live video panel */}
+          <div
+            className={`relative mb-4 overflow-hidden bg-zinc-900 transition-all duration-300 ${isSpeaking ? 'vera-ring-pulse' : ''}`}
+            style={{ width: 200, height: 260, borderRadius: 16 }}
+          >
+            {/* Base layer: still portrait, always visible */}
+            <img
+              src="/vera-avatar.jpg"
+              alt="Vera Avatar"
+              className="absolute inset-0 w-full h-full object-cover object-top"
+              onError={(e) => { e.currentTarget.style.display='none'; }}
+            />
+            {/* Top layer: video, fades in while speaking */}
+            <video
+              ref={videoRef}
+              src="/Vera_720p.mp4"
+              muted
+              playsInline
+              loop
+              preload="auto"
+              className="absolute inset-0 w-full h-full object-cover object-top transition-opacity duration-300"
+              style={{ opacity: isSpeaking ? 1 : 0 }}
+            />
           </div>
-          
+
+          {/* Live status indicator */}
+          <div className="flex items-center gap-2 mb-6">
+            {(() => {
+              const status = isListening
+                ? { color: 'bg-emerald-500', pulse: true, label: 'Listening...' }
+                : isSpeaking
+                ? { color: 'bg-indigo-500', pulse: true, label: 'Speaking' }
+                : isLoading
+                ? { color: 'bg-amber-500', pulse: true, label: 'Thinking...' }
+                : { color: 'bg-zinc-500', pulse: false, label: 'Online' };
+              return (
+                <>
+                  <span
+                    className={`rounded-full ${status.color} ${status.pulse ? 'animate-pulse' : ''}`}
+                    style={{ width: 8, height: 8 }}
+                  />
+                  <span className="text-[12px] font-medium text-zinc-300">{status.label}</span>
+                </>
+              );
+            })()}
+          </div>
+
+          {/* Call mode button */}
+          <div className="w-full px-2 mb-6">
+            <button
+              onClick={() => {
+                if (callMode) {
+                  setCallMode(false);
+                  stopListening();
+                } else {
+                  setCallMode(true);
+                  startListening();
+                }
+              }}
+              className="w-full flex items-center justify-center gap-3 px-4 py-[12px] text-white rounded-[14px] transition-all text-[13px] font-semibold hover:scale-[1.02] hover:brightness-110"
+              style={callMode
+                ? { background: 'linear-gradient(135deg, #ef4444, #dc2626)', boxShadow: '0 4px 15px rgba(239,68,68,0.4)' }
+                : { background: 'linear-gradient(135deg, #6366f1, #8b5cf6)', boxShadow: '0 4px 15px rgba(99,102,241,0.4)' }
+              }
+            >
+              {callMode ? <MicOff size={18} /> : <Mic size={18} />}
+              {callMode ? 'End call' : 'Start call'}
+            </button>
+          </div>
+
           <h1 className="text-xl font-black tracking-tighter mb-1">VERA</h1>
           <p className="text-[10px] uppercase tracking-[0.3em] font-bold text-zinc-500 mb-6">Personal Tutor</p>
-          
+
           <ModeBadge currentMode={mode} className="mb-8" />
 
           <div className="w-full space-y-4 px-2">
