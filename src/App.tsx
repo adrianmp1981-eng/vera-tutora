@@ -1264,11 +1264,12 @@ export default function App() {
   return (
     <div className="flex h-screen bg-[#fafaf8] text-zinc-900 font-sans overflow-hidden">
       {/* Sidebar */}
-      <aside 
-        className="w-[260px] h-screen bg-[#1a1a2e] text-white flex flex-col shrink-0 z-20 shadow-2xl border-r border-[#ffffff10] overflow-y-auto pb-6"
+      <aside
+        className="w-[260px] h-screen bg-[#1a1a2e] text-white flex flex-col shrink-0 z-20 shadow-2xl border-r border-[#ffffff10]"
         style={{ background: 'linear-gradient(180deg, #1a1a2e 0%, #16213e 100%)' }}
       >
-        <div className="p-8 flex flex-col items-center text-center">
+        {/* Fixed zone (does not scroll): Daily session, video, status, call, title, badge */}
+        <div className="px-8 pt-8 pb-4 flex flex-col items-center text-center flex-shrink-0">
           {/* Daily session — top of the sidebar, with streak badge */}
           <button
             onClick={() => handleSend(undefined, '/daily')}
@@ -1287,7 +1288,7 @@ export default function App() {
           {/* Live video panel */}
           <div
             className={`relative mb-4 overflow-hidden bg-zinc-900 transition-all duration-300 ${isSpeaking ? 'vera-ring-pulse' : ''}`}
-            style={{ width: 200, height: 260, borderRadius: 16 }}
+            style={{ width: 200, height: 220, borderRadius: 16 }}
           >
             {/* Base layer: still portrait, always visible */}
             <img
@@ -1357,8 +1358,11 @@ export default function App() {
           <h1 className="text-xl font-black tracking-tighter mb-1">VERA</h1>
           <p className="text-[10px] uppercase tracking-[0.3em] font-bold text-zinc-500 mb-6">Personal Tutor</p>
 
-          <ModeBadge currentMode={mode} className="mb-8" />
+          <ModeBadge currentMode={mode} className="mb-2" />
+        </div>
 
+        {/* Scroll zone: progress bars, streak/flashcards cards, study plan, report, about */}
+        <div className="flex-1 overflow-y-auto px-8 pt-4 pb-6 flex flex-col items-center text-center">
           <div className="w-full space-y-4 px-2">
             <ProgressBar label="English" value={progress.english} color="bg-blue-500" />
             <ProgressBar label="Habits" value={progress.habits} color="bg-amber-500" />
@@ -1637,11 +1641,11 @@ export default function App() {
                 className="absolute inset-0 flex flex-col items-center justify-center p-8 overflow-y-auto"
               >
                 <div className="w-32 h-32 rounded-full shimmer bg-zinc-200 mb-8 overflow-hidden border-4 border-white shadow-xl">
-                  <video 
-                    src="/vera-intro.mp4" 
-                    autoPlay 
-                    loop 
-                    muted 
+                  <video
+                    src="/Vera_720p.mp4"
+                    autoPlay
+                    loop
+                    muted
                     playsInline
                     className="w-full h-full object-cover object-top"
                   />
