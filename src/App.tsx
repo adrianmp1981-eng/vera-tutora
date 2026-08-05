@@ -706,14 +706,22 @@ export default function App() {
     let out = text;
     let touched = false;
 
-    // [FLASHCARD]front|back|example|category[/FLASHCARD]
+    // [FLASHCARD]cardType|front|back|example|category[/FLASHCARD]
+    // Back-compat: if only 4 fields arrive, assume cardType 'term'.
     const fcRegex = /\[FLASHCARD\]([\s\S]*?)\[\/FLASHCARD\]/g;
     let m: RegExpExecArray | null;
     while ((m = fcRegex.exec(text)) !== null) {
       const parts = m[1].split('|').map(s => s.trim());
-      const [front, back, example, category] = parts;
+      let cardType: string;
+      let front: string, back: string, example: string, category: string;
+      if (parts.length >= 5) {
+        [cardType, front, back, example, category] = parts;
+      } else {
+        cardType = 'term';
+        [front, back, example, category] = parts;
+      }
       if (front && back) {
-        saveFlashcard({ front, back, example: example || undefined, category });
+        saveFlashcard({ cardType, front, back, example: example || undefined, category });
         touched = true;
       }
     }
@@ -825,6 +833,9 @@ export default function App() {
     else if (messageText.startsWith('/coding')) detectedMode = 'coding';
     else if (messageText.startsWith('/logistics')) detectedMode = 'logistics';
     else if (messageText.startsWith('/daily')) detectedMode = 'daily';
+    else if (messageText.startsWith('/explain')) detectedMode = 'explain';
+    else if (messageText.startsWith('/case')) detectedMode = 'case';
+    else if (messageText.startsWith('/shadow')) detectedMode = 'shadow';
     else if (messageText.startsWith('/simulate')) {
       setShowSimulationPicker(true);
       setIsLoading(false);
@@ -2041,6 +2052,9 @@ export default function App() {
                                 {[
                                   { id: 'daily', label: 'Daily session', icon: '🔥', cmd: '/daily' },
                                   { id: 'review', label: 'Review flashcards', icon: '🃏', cmd: '/review' },
+                                  { id: 'explain', label: 'Explain it back (Feynman)', icon: '🧠', cmd: '/explain' },
+                                  { id: 'case', label: 'Real-world case', icon: '📋', cmd: '/case' },
+                                  { id: 'shadow', label: 'Shadowing practice', icon: '🎙️', cmd: '/shadow' },
                                   { id: 'english', label: 'English practice', icon: '🇺🇸', cmd: '/english' },
                                   { id: 'portuguese', label: 'Portuguese (Portugal)', icon: '🇵🇹', cmd: '/portuguese' },
                                   { id: 'habits', label: 'Habits & productivity', icon: '⚡', cmd: '/habits' },
@@ -2370,9 +2384,25 @@ export default function App() {
               </motion.div>
             ) : (
               <div className="w-full max-w-xl flex flex-col items-center px-4">
-                {/* Category chip */}
-                <div className="mb-6 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest bg-white/10 text-indigo-200">
-                  {reviewQueue[reviewIndex].category}
+                {/* Card type + category chips */}
+                <div className="mb-6 flex items-center gap-2">
+                  {(() => {
+                    const t = reviewQueue[reviewIndex].cardType || 'term';
+                    const styles: Record<string, string> = {
+                      term: 'bg-zinc-500/20 text-zinc-300',
+                      chunk: 'bg-blue-500/20 text-blue-300',
+                      pattern: 'bg-purple-500/20 text-purple-300',
+                      case: 'bg-amber-500/20 text-amber-300',
+                    };
+                    return (
+                      <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest ${styles[t] || styles.term}`}>
+                        {t}
+                      </span>
+                    );
+                  })()}
+                  <span className="px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest bg-white/10 text-indigo-200">
+                    {reviewQueue[reviewIndex].category}
+                  </span>
                 </div>
 
                 {/* Card with flip animation */}

@@ -282,13 +282,48 @@ COMMANDS:
 
 const FLASHCARD_INSTRUCTION = `SPACED-REPETITION FLASHCARDS — CREATE THEM YOURSELF:
 Whenever you teach a term, phrase, or concept that is worth remembering, emit a flashcard at the VERY END of your message, after all your normal text, using this EXACT format (one per line, no extra spaces around the pipes):
-[FLASHCARD]front|back|example|category[/FLASHCARD]
-- front: the word/term/concept to recall (the prompt side)
-- back: the meaning/answer/definition
+[FLASHCARD]cardType|front|back|example|category[/FLASHCARD]
+- cardType: one of term, chunk, pattern, case (see "CHUNKS OVER WORDS" below to choose)
+- front: the word/chunk/pattern/scenario to recall (the prompt side)
+- back: the meaning/answer/definition/solution
 - example: one short real sentence showing it in context
 - category: one of english, portuguese, spanish, logistics, football, business, coding, other
 This works for BOTH language vocabulary AND professional concepts: Incoterms (EXW, FOB, CIF, DDP), logistics KPIs (OTIF, fill rate, inventory turnover), football metrics (xG, PPDA, progressive passes), procurement and business terms, coding terms, etc.
-Only create a flashcard when something is genuinely worth memorizing (aim for 1-3 per teaching message, not every message). Never mention the flashcard tags to the user or explain them — they are parsed and hidden automatically.`;
+Only create a flashcard when something is genuinely worth memorizing (aim for 1-3 per teaching message, not every message). Never mention the flashcard tags to the user or explain them — they are parsed and hidden automatically.
+
+CHUNKS OVER WORDS — this is critical for fluency. Native speakers store whole blocks, not individual words. When teaching English or Portuguese, prioritize teaching CHUNKS (multi-word expressions used as a unit) over isolated vocabulary. Instead of teaching 'appeal' alone, teach 'lodge an appeal against the decision'. Instead of 'delay', teach 'we're running behind schedule'. Emit these as cardType 'chunk'.
+For professional topics, teach PATTERNS instead of isolated facts. Instead of listing all 11 Incoterms, teach the rule that separates the 4 groups (E/F/C/D) and let the specific terms hang off that rule. Emit these as cardType 'pattern'.
+
+FORCED PRODUCTION — always make Adri attempt BEFORE you give the answer. What he produces himself sticks far better than what he reads.
+- Before explaining a new term, ask him to guess or attempt it: 'How would you say X in English?' / 'Which Incoterm fits this case?'
+- Wait for his attempt in his next message. Only then give the correct answer and explain the gap.
+- Never front-load the answer. The attempt comes first, always.`;
+
+const FEYNMAN_MODE = `FEYNMAN MODE — Adri is going to explain a concept back to you as if teaching it to someone else. This is how he finds the holes in his own understanding.
+1. Ask him to pick a concept he thinks he knows (or suggest one from his weakest area based on his progress).
+2. Ask him to explain it in simple terms, as if to someone with no background. If the concept is professional (Incoterms, supply chain, football tactics), ask him to explain it IN ENGLISH — he practices both at once.
+3. Listen for: vague hand-waving, jargon used as a substitute for understanding, gaps in the causal chain, missing edge cases.
+4. Point out exactly where the explanation broke down. Be specific and direct.
+5. Give him the missing piece, then ask him to explain that part again.
+Do not accept a vague explanation as correct. Push until it's clear.`;
+
+const CASE_MODE = `CASE MODE — present Adri with a realistic professional scenario from his world and make him decide before revealing anything.
+His world: supply chain coordinator in the aeronautical sector in Spain, Tier 1 working with Airbus, managing subcontracted suppliers. Also football club operations and management.
+Structure:
+1. Present a concrete scenario with real constraints, numbers and a time pressure. Examples: 'A Tier 2 supplier in Morocco just told you the machined parts will be 3 weeks late. The Airbus delivery slot is in 4 weeks. Your options are...' / 'You need to ship AOG parts from Toulouse to Seville in 12 hours. Which Incoterm and which transport mode?' / 'Your club's medical staff flags a player as high-risk, but the coach wants him to start the derby. How do you structure that conversation?'
+2. Ask what HE would do — do not give options unless he asks.
+3. React to his answer as the situation would: challenge weak reasoning, introduce a complication if his plan is too easy.
+4. Only at the end, give the professional best-practice answer and what he missed.
+5. Emit a [FLASHCARD] with cardType 'case' capturing the key lesson.
+Run the case in English so he practices the language while solving it.`;
+
+const SHADOW_MODE = `SHADOWING MODE — Adri repeats sentences after you to build physical fluency: rhythm, stress and intonation, not knowledge.
+1. Say ONE sentence at a time, natural length (8-15 words), relevant to his professional world.
+2. Tell him to repeat it out loud, imitating your rhythm and stress — not just the words.
+3. Activate hands-free voice mode by emitting [STARTCALL] at the end of your first message.
+4. When he repeats it, comment on what sounded off: word stress, linking, rhythm, a swallowed ending.
+5. Give the next sentence, gradually increasing length and complexity.
+Do 8-10 sentences per session. Keep your comments short so the rhythm of the drill isn't broken.`;
 
 const ENGLISH_FLUENCY_RULES = `CONTEXT: The user (Adri) wants to gain SPEAKING FLUENCY in English. His #1 goal is to speak a lot and sound natural.
 
@@ -301,16 +336,40 @@ FLUENCY-FIRST CORRECTION RULES:
 - Ask open-ended questions so he speaks in full sentences, never yes/no.
 - If he answers briefly, push him: "Tell me more about that." / "Why do you think so?"`;
 
+/**
+ * Reorder cards so categories alternate (interleaving) instead of grouping.
+ * Greedily picks from the largest remaining category that isn't the one just used,
+ * which avoids long runs of the same category.
+ */
+function interleaveByCategory(cards: any[]): any[] {
+  const buckets: Record<string, any[]> = {};
+  for (const c of cards) {
+    (buckets[c.category] = buckets[c.category] || []).push(c);
+  }
+  const result: any[] = [];
+  let last: string | null = null;
+  while (result.length < cards.length) {
+    const cats = Object.keys(buckets).filter((k) => buckets[k].length > 0);
+    if (cats.length === 0) break;
+    cats.sort((a, b) => buckets[b].length - buckets[a].length);
+    const pick = cats.find((k) => k !== last) ?? cats[0];
+    result.push(buckets[pick].shift());
+    last = pick;
+  }
+  return result;
+}
+
 /** Builds the guided 3-phase daily-session instruction, injecting today's due cards. */
 function buildDailyInstruction(): string {
-  const due = getDueCards().slice(0, 5);
+  // Interleave across categories, then take up to 5 (Phase 1 mixes categories deliberately).
+  const due = interleaveByCategory(getDueCards()).slice(0, 5);
   const streak = getStreak();
 
   const cardsBlock = due.length
     ? due
         .map(
           (c, i) =>
-            `${i + 1}. id=${c.id} | front="${c.front}" | answer="${c.back}"${c.example ? ` | example="${c.example}"` : ''} | category=${c.category}`
+            `${i + 1}. id=${c.id} | type=${c.cardType || 'term'} | front="${c.front}" | answer="${c.back}"${c.example ? ` | example="${c.example}"` : ''} | category=${c.category}`
         )
         .join('\n')
     : '(no cards are due today — skip Phase 1 and say so)';
@@ -319,8 +378,9 @@ function buildDailyInstruction(): string {
 Run these THREE phases IN ORDER, all inside this normal chat. Move through them naturally in conversation. Keep every message concise so it feels like a live coach, not a lecture.
 
 PHASE 1 — REVIEW (~3 min):
-Greet Adri warmly, mention his streak, then review his due flashcards ONE AT A TIME as questions (max 5). Here are today's due cards:
+Greet Adri warmly, mention his streak, then review his due flashcards ONE AT A TIME as questions (max 5). The cards below are already ordered for you. Here are today's due cards:
 ${cardsBlock}
+INTERLEAVING — mix the review cards across categories rather than grouping them. Alternate: an English chunk, then a logistics pattern, then a football metric, then back to English. This feels harder and produces much better retention than blocked practice. Never review three cards from the same category in a row if other categories have due cards. (The order above is already interleaved — keep it.)
 For each card: ask the front as a question, WAIT for his answer in his next message, then tell him if he was right and give the correct answer. After grading his answer, emit a review tag at the end of that message using this EXACT format:
 [REVIEW]cardId|quality[/REVIEW]
 where quality is 0 if he failed/blanked, 3 if he hesitated or was partially right, 4 if he got it right, 5 if he nailed it instantly. Use the id shown above. Only review one card per message so you can grade each answer. When all due cards are done (or if none were due), announce you're moving to Phase 2.
@@ -360,6 +420,12 @@ function buildSystemPrompt(messages: Message[], lastMessage: string, mode?: Mode
     base += `\n\n${ENGLISH_FLUENCY_RULES}`;
   } else if (mode === 'daily') {
     base += buildDailyInstruction();
+  } else if (mode === 'explain') {
+    base += `\n\n${FEYNMAN_MODE}`;
+  } else if (mode === 'case') {
+    base += `\n\n${CASE_MODE}`;
+  } else if (mode === 'shadow') {
+    base += `\n\n${SHADOW_MODE}`;
   } else if (mode === 'portuguese') {
     base += "\n\nCONTEXT: The user wants to learn European Portuguese (Portugal). ALWAYS use European Portuguese, never Brazilian. Start by asking their current level (A1/A2/B1/B2/C1/C2) if not known from memory. Then teach according to their level. Use the complete curriculum. Correct their Portuguese writing immediately. Use visual aids (tables, flashcards) for vocabulary. Suggest resources when appropriate.";
   } else if (mode === 'simulation' && simulationContext) {

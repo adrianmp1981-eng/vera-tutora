@@ -15,12 +15,22 @@ export type FlashcardCategory =
   | 'coding'
   | 'other';
 
+/**
+ * How a card should be learned:
+ * - term:    a single word or isolated concept
+ * - chunk:   a whole multi-word block used as a unit ("lodge an appeal against")
+ * - pattern: a professional rule / decision pattern ("buyer pays main freight → group F Incoterm")
+ * - case:    a practical scenario with its solution
+ */
+export type CardType = 'term' | 'chunk' | 'pattern' | 'case';
+
 export interface Flashcard {
   id: string;
   front: string;
   back: string;
   example?: string;
   category: FlashcardCategory;
+  cardType: CardType;
   createdAt: string;
   interval: number;      // days until next review
   easeFactor: number;    // SM-2 ease factor (>= 1.3)
@@ -49,6 +59,13 @@ const normalizeCategory = (raw?: string): FlashcardCategory => {
   return (VALID_CATEGORIES as string[]).includes(c) ? (c as FlashcardCategory) : 'other';
 };
 
+const VALID_CARD_TYPES: CardType[] = ['term', 'chunk', 'pattern', 'case'];
+
+const normalizeCardType = (raw?: string): CardType => {
+  const c = (raw || '').trim().toLowerCase();
+  return (VALID_CARD_TYPES as string[]).includes(c) ? (c as CardType) : 'term';
+};
+
 const generateId = (): string =>
   `fc-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 
@@ -61,7 +78,10 @@ const endOfToday = (): number => {
 export const getFlashcards = (): Flashcard[] => {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? (JSON.parse(saved) as Flashcard[]) : [];
+    if (!saved) return [];
+    const cards = JSON.parse(saved) as Flashcard[];
+    // Back-compat: cards created before cardType existed default to 'term'.
+    return cards.map((c) => ({ ...c, cardType: c.cardType || 'term' }));
   } catch {
     return [];
   }
@@ -76,6 +96,7 @@ export interface NewFlashcard {
   back: string;
   example?: string;
   category?: string;
+  cardType?: string;
 }
 
 /**
@@ -101,6 +122,7 @@ export const saveFlashcard = (card: NewFlashcard): Flashcard => {
     back,
     example: card.example?.trim() || undefined,
     category,
+    cardType: normalizeCardType(card.cardType),
     createdAt: now,
     interval: 0,
     easeFactor: 2.5,
