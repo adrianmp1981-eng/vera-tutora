@@ -501,6 +501,87 @@ export async function getSummary(messages: Message[]): Promise<string> {
   }
 }
 
+export interface OpeningContext {
+  memory: UserMemory | null;
+  streak: number;                       // raw stored streak (before break check)
+  dueCards: number;                     // flashcards due today
+  lowestModule: string;                 // module key with least progress
+  daysSinceLastSession: number | null;  // calendar days since last completed session, null if never
+}
+
+const MODULE_LABELS_ES: Record<string, string> = {
+  english: 'inglés',
+  portuguese: 'portugués',
+  logistics: 'logística',
+  sports: 'fútbol',
+  business: 'business',
+  coding: 'programación',
+  habits: 'hábitos',
+  learn: 'cultura',
+};
+
+/**
+ * Vera takes the initiative: builds a short opening greeting that ALWAYS makes a
+ * concrete proposal, chosen by priority from the user's real state.
+ */
+export async function buildOpeningMessage(ctx: OpeningContext): Promise<string> {
+  const { memory, streak, dueCards, lowestModule, daysSinceLastSession } = ctx;
+  const name = memory?.name || 'Adri';
+  const lang = memory?.preferences?.language === 'english' ? 'english' : 'spanish';
+  const moduleLabel = MODULE_LABELS_ES[lowestModule] || lowestModule;
+
+  const isFirstTime = daysSinceLastSession === null;
+  const todayCompleted = daysSinceLastSession === 0;
+  const streakBroken = daysSinceLastSession !== null && daysSinceLastSession >= 2 && streak > 0;
+
+  // Deterministic priority: pick the directive + a safe fallback line.
+  let directive: string;
+  let fallback: string;
+  if (dueCards >= 5) {
+    directive = `${name} has ${dueCards} flashcards due from previous days. Propose reviewing them first (about 3 minutes) before anything else.`;
+    fallback = `Hey ${name}. Tienes ${dueCards} cartas esperando de días anteriores. ¿Las repasamos en 3 minutos antes de nada?`;
+  } else if (streakBroken) {
+    directive = `${name} broke his ${streak}-day streak — he missed a day. Acknowledge it briefly without drama and propose restarting today with a fresh 15-minute daily session.`;
+    fallback = `${name}, se te rompió la racha. Empezamos de cero hoy con 15 minutos. ¿Arrancamos con la sesión diaria?`;
+  } else if (!isFirstTime && !todayCompleted) {
+    directive = `${name} hasn't done today's daily session yet (current streak ${streak} days). Propose doing the 15-minute daily session now.`;
+    fallback = `${name}, llevas ${streak} día(s) de racha. Hoy toca tu sesión diaria de 15 minutos. ¿Vamos?`;
+  } else if (!isFirstTime && todayCompleted) {
+    directive = `${name} already did today's session. Propose practicing his weakest area right now: ${moduleLabel}. Suggest a short focused practice there.`;
+    fallback = `${name}, ya hiciste la diaria. Ahora aprovechemos para practicar ${moduleLabel}, que es donde menos has avanzado. ¿Le entramos?`;
+  } else {
+    directive = `This is ${name}'s first session. Introduce yourself briefly as Vera, his personal tutor, and propose starting with English.`;
+    fallback = `Hola ${name}, soy Vera, tu tutora personal. Vamos a empezar por inglés para coger soltura. ¿Te parece?`;
+  }
+
+  const prompt = `Write Vera's OPENING greeting for ${name}.
+SITUATION (do exactly this proposal): ${directive}
+${memory ? `About ${name}: goals = ${memory.goals.join(', ')}; interests = logistics, supply chain, football, business.` : ''}
+HARD RULES:
+- Language: reply in ${lang === 'english' ? 'English' : 'Spanish'}.
+- Keep it SHORT: 2-3 sentences maximum.
+- Be direct and warm. Address him by name.
+- ALWAYS end with a CONCRETE proposal and a CLOSED yes/no confirmation question (e.g. "¿Vamos?", "¿Arrancamos?", "¿Le entramos?").
+- NEVER ask an open-ended question like "what do you want to do today?".
+- Output ONLY the greeting text, no quotes, no preamble.`;
+
+  const ai = getAI();
+  try {
+    const response = await ai.models.generateContent({
+      model: MODELS.summary,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        systemInstruction: 'You are Vera, a warm, direct personal tutor who always takes the initiative with a concrete proposal.',
+        temperature: 0.7,
+      },
+    });
+    return (response.text || fallback).trim();
+  } catch (error) {
+    console.error('Opening message error:', error);
+    return fallback;
+  }
+}
+
 export async function generateVeraPortrait(): Promise<string | null> {
   const cached = localStorage.getItem(PORTRAIT_CACHE_KEY);
   if (cached) return cached;

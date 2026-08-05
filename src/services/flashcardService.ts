@@ -3,6 +3,8 @@
  * Cards are stored in localStorage under 'vera_flashcards'.
  */
 
+import { recordCardCreated, recordCardMastered } from './progressService';
+
 export type FlashcardCategory =
   | 'english'
   | 'portuguese'
@@ -25,6 +27,7 @@ export interface Flashcard {
   repetitions: number;   // consecutive successful reviews
   nextReview: string;    // ISO date when the card is due again
   lapses: number;        // times the card was failed
+  mastered?: boolean;    // true once interval first passed 21 days (for progress tracking)
 }
 
 export interface FlashcardStats {
@@ -104,9 +107,11 @@ export const saveFlashcard = (card: NewFlashcard): Flashcard => {
     repetitions: 0,
     nextReview: now, // due right away
     lapses: 0,
+    mastered: false,
   };
 
   persist([...cards, newCard]);
+  recordCardCreated(category);
   return newCard;
 };
 
@@ -157,6 +162,12 @@ export const reviewCard = (id: string, quality: number): Flashcard | null => {
   const next = new Date();
   next.setDate(next.getDate() + card.interval);
   card.nextReview = next.toISOString();
+
+  // Count the card as mastered the first time its interval passes 21 days.
+  if (card.interval > 21 && !card.mastered) {
+    card.mastered = true;
+    recordCardMastered(card.category);
+  }
 
   cards[idx] = card;
   persist(cards);

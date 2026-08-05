@@ -48,7 +48,9 @@ import {
   generateStudyPlan,
   generateWeeklyReport,
   searchResources,
-  generateSimulationContext
+  generateSimulationContext,
+  buildOpeningMessage,
+  OpeningContext
 } from './services/geminiService';
 import { getMemory, saveMemory, updateMemory, hasMemory } from './services/memoryService';
 import { WeeklyStats } from './types';
@@ -67,6 +69,14 @@ import {
   addWordsSpoken,
   DailyState
 } from './services/dailySessionService';
+import {
+  getProgress,
+  getProgressPercent,
+  getLowestModule,
+  recordMessage,
+  recordSessionCompleted,
+  ModuleProgress
+} from './services/progressService';
 
 const getStartOfWeek = () => {
   const now = new Date();
@@ -259,6 +269,7 @@ export default function App() {
   // Daily session + flashcards state
   const [dailyState, setDailyState] = useState<DailyState>(() => getDailyState());
   const [cardStats, setCardStats] = useState<FlashcardStats>(() => getFlashcardStats());
+  const [progressData, setProgressData] = useState<Record<string, ModuleProgress>>(() => getProgress());
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [reviewQueue, setReviewQueue] = useState<Flashcard[]>([]);
   const [reviewIndex, setReviewIndex] = useState(0);
@@ -268,6 +279,7 @@ export default function App() {
   const refreshDaily = () => {
     setDailyState(getDailyState());
     setCardStats(getFlashcardStats());
+    setProgressData(getProgress());
   };
 
   const countWords = (s: string) =>
@@ -372,42 +384,71 @@ export default function App() {
   }, [weeklyStats.weekStart]);
 
   useEffect(() => {
-    // Initial greeting for returning users
+    // Vera takes the initiative for returning users with a concrete proposal
     if (hasMemory() && messages.length === 0) {
       const mem = getMemory();
       if (mem) {
-        const lastSeenDate = new Date(mem.lastSeen);
-        const daysSince = Math.floor((Date.now() - lastSeenDate.getTime()) / (1000 * 60 * 60 * 24));
-        
-        let greeting = `Welcome back, ${mem.name}! Ready to continue our journey?`;
-        if (daysSince > 3) {
-          greeting = `Hey ${mem.name}, it's been a few days! Let's get back on track. What are we working on today?`;
-        }
-        
-        const initialMsg: Message = {
-          id: 'welcome-back',
-          role: 'model',
-          text: greeting,
-          timestamp: Date.now(),
-        };
-        setMessages([initialMsg]);
-        setIsWelcomeScreen(false);
-        
-        // Increment sessions
-        updateMemory({ 
+        updateMemory({
           totalSessions: (mem.totalSessions || 0) + 1,
           lastSeen: new Date().toISOString()
         });
         setMemory(getMemory());
+        openWithProposal();
       }
     }
   }, []);
 
+  // Calendar days between an ISO date and today (0 = same day).
+  const calendarDaysSince = (iso: string): number => {
+    const from = new Date(iso);
+    const a = new Date(from.getFullYear(), from.getMonth(), from.getDate());
+    const now = new Date();
+    const b = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    return Math.round((b.getTime() - a.getTime()) / (1000 * 60 * 60 * 24));
+  };
+
+  // Generate Vera's proactive opening message from the user's real state.
+  const openWithProposal = async () => {
+    const mem = getMemory();
+    const daily = getDailyState();
+    const ctx: OpeningContext = {
+      memory: mem,
+      streak: daily.streak,
+      dueCards: getDueCards().length,
+      lowestModule: getLowestModule(),
+      daysSinceLastSession: daily.lastSessionDate ? calendarDaysSince(daily.lastSessionDate) : null,
+    };
+    setIsWelcomeScreen(false);
+    setIsLoading(true);
+    try {
+      const text = await buildOpeningMessage(ctx);
+      const msg: Message = { id: generateId(), role: 'model', text, timestamp: Date.now() };
+      setMessages([msg]);
+      speakText(text);
+    } catch (err) {
+      const msg: Message = {
+        id: generateId(),
+        role: 'model',
+        text: `Hey ${mem?.name || 'Adri'}, ¿arrancamos con tu sesión diaria de hoy?`,
+        timestamp: Date.now(),
+      };
+      setMessages([msg]);
+    } finally {
+      setIsLoading(false);
+      refreshDaily();
+    }
+  };
+
   const handleNewSession = () => {
     setMessages([]);
     setMode('general');
-    setIsWelcomeScreen(true);
     setError(null);
+    if (hasMemory()) {
+      // Vera opens the new session with a concrete proposal instead of a passive picker
+      openWithProposal();
+    } else {
+      setIsWelcomeScreen(true);
+    }
   };
 
   const updateProgress = (currentMode: Mode) => {
@@ -659,6 +700,7 @@ export default function App() {
     if (/\[SESSIONCOMPLETE\]/.test(out)) {
       out = out.replace(/\[SESSIONCOMPLETE\]/g, '');
       completeSession();
+      recordSessionCompleted('english'); // daily sessions center on English fluency
       setCallMode(false);
       touched = true;
     }
@@ -745,6 +787,8 @@ export default function App() {
     
     if (detectedMode !== mode) setMode(detectedMode);
     updateProgress(detectedMode);
+    recordMessage(detectedMode);
+    setProgressData(getProgress());
 
     // Kick off a fresh daily session when /daily is invoked
     if (messageText.startsWith('/daily')) {
@@ -1359,10 +1403,28 @@ export default function App() {
         {/* Scroll zone: progress bars, streak/flashcards cards, study plan, report, about */}
         <div className="flex-1 overflow-y-auto px-5 pt-4 pb-6 flex flex-col items-center text-center">
           <div className="w-full space-y-4 px-2">
-            <ProgressBar label="English" value={progress.english} color="bg-blue-500" />
-            <ProgressBar label="Habits" value={progress.habits} color="bg-amber-500" />
-            <ProgressBar label="Culture" value={progress.culture} color="bg-emerald-500" />
-            <ProgressBar label="Sports" value={progress.sports} color="bg-orange-500" />
+            {[
+              { label: 'English', module: 'english', color: 'bg-blue-500' },
+              { label: 'Portuguese', module: 'portuguese', color: 'bg-green-500' },
+              { label: 'Logistics', module: 'logistics', color: 'bg-red-500' },
+              { label: 'Football', module: 'sports', color: 'bg-orange-500' },
+              { label: 'Business', module: 'business', color: 'bg-purple-500' },
+              { label: 'Coding', module: 'coding', color: 'bg-teal-500' },
+            ].map((b) => {
+              // Reference progressData so the bars re-render whenever it refreshes.
+              void progressData;
+              return (
+                <ProgressBar
+                  key={b.module}
+                  label={b.label}
+                  value={getProgressPercent(b.module)}
+                  color={b.color}
+                />
+              );
+            })}
+            <div className="pt-1 text-[10px] font-medium text-zinc-500 text-left">
+              {cardStats.total} terms learned · {cardStats.mastered} mastered
+            </div>
           </div>
 
           {/* Daily streak + Flashcards widgets */}
