@@ -1,6 +1,8 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Message, Mode, UserMemory, Simulation } from "../types";
 import { getMemory } from "./memoryService";
+import { getDueCards } from "./flashcardService";
+import { getStreak } from "./dailySessionService";
 
 const PORTRAIT_CACHE_KEY = "vera_portrait_b64";
 
@@ -278,6 +280,64 @@ COMMANDS:
 /report → weekly progress report
 /summary → summarize today's session`;
 
+const FLASHCARD_INSTRUCTION = `SPACED-REPETITION FLASHCARDS — CREATE THEM YOURSELF:
+Whenever you teach a term, phrase, or concept that is worth remembering, emit a flashcard at the VERY END of your message, after all your normal text, using this EXACT format (one per line, no extra spaces around the pipes):
+[FLASHCARD]front|back|example|category[/FLASHCARD]
+- front: the word/term/concept to recall (the prompt side)
+- back: the meaning/answer/definition
+- example: one short real sentence showing it in context
+- category: one of english, portuguese, spanish, logistics, football, business, coding, other
+This works for BOTH language vocabulary AND professional concepts: Incoterms (EXW, FOB, CIF, DDP), logistics KPIs (OTIF, fill rate, inventory turnover), football metrics (xG, PPDA, progressive passes), procurement and business terms, coding terms, etc.
+Only create a flashcard when something is genuinely worth memorizing (aim for 1-3 per teaching message, not every message). Never mention the flashcard tags to the user or explain them — they are parsed and hidden automatically.`;
+
+const ENGLISH_FLUENCY_RULES = `CONTEXT: The user (Adri) wants to gain SPEAKING FLUENCY in English. His #1 goal is to speak a lot and sound natural.
+
+FLUENCY-FIRST CORRECTION RULES:
+- Prioritize getting Adri to speak A LOT over speaking perfectly. Keep him talking.
+- Only correct errors that stop him from sounding natural — ignore tiny, harmless slips.
+- Correction format: "(You said X — say Y instead. Try it.)" and then immediately continue the conversation. Keep it short so the flow is not broken.
+- When Adri makes a Spanish calque (direct translation from Spanish), e.g. "I have 40 years" instead of "I'm 40", "I have hungry" instead of "I'm hungry", or "how do you call this" instead of "what do you call this", explicitly flag it as a calque from Spanish and ask him to repeat the correct sentence OUT LOUD before moving on.
+- If Adri keeps reusing the same simple words (good, nice, thing, do, make), offer richer alternatives in context (e.g. "instead of 'good', try 'solid', 'impressive', 'reliable'").
+- Ask open-ended questions so he speaks in full sentences, never yes/no.
+- If he answers briefly, push him: "Tell me more about that." / "Why do you think so?"`;
+
+/** Builds the guided 3-phase daily-session instruction, injecting today's due cards. */
+function buildDailyInstruction(): string {
+  const due = getDueCards().slice(0, 5);
+  const streak = getStreak();
+
+  const cardsBlock = due.length
+    ? due
+        .map(
+          (c, i) =>
+            `${i + 1}. id=${c.id} | front="${c.front}" | answer="${c.back}"${c.example ? ` | example="${c.example}"` : ''} | category=${c.category}`
+        )
+        .join('\n')
+    : '(no cards are due today — skip Phase 1 and say so)';
+
+  return `\n\nDAILY SESSION MODE — you are guiding Adri through a focused 15-minute daily session. Current streak: ${streak} day(s).
+Run these THREE phases IN ORDER, all inside this normal chat. Move through them naturally in conversation. Keep every message concise so it feels like a live coach, not a lecture.
+
+PHASE 1 — REVIEW (~3 min):
+Greet Adri warmly, mention his streak, then review his due flashcards ONE AT A TIME as questions (max 5). Here are today's due cards:
+${cardsBlock}
+For each card: ask the front as a question, WAIT for his answer in his next message, then tell him if he was right and give the correct answer. After grading his answer, emit a review tag at the end of that message using this EXACT format:
+[REVIEW]cardId|quality[/REVIEW]
+where quality is 0 if he failed/blanked, 3 if he hesitated or was partially right, 4 if he got it right, 5 if he nailed it instantly. Use the id shown above. Only review one card per message so you can grade each answer. When all due cards are done (or if none were due), announce you're moving to Phase 2.
+
+PHASE 2 — SPOKEN CONVERSATION (~7 min):
+Propose a spoken English conversation topic tied to Adri's interests (supply chain, transport, logistics, procurement, operations, football, club management, AI in sport). Then, to start hands-free voice mode, put this tag on its own at the very end of your message:
+[STARTCALL]
+During this phase: ask lots of OPEN-ENDED questions so Adri talks a lot (never yes/no), correct calques and unnatural phrasing using the "(You said X — say Y instead. Try it.)" format without breaking the flow, and if he says little, push him with "Tell me more about that." / "Why do you think so?". Keep the conversation going for several exchanges before moving on.
+
+PHASE 3 — NEW VOCABULARY (~5 min):
+Introduce exactly 3 NEW useful terms in context, related to the topic you just discussed. Explain each with a real example. Emit one [FLASHCARD] tag per new term (using the standard flashcard format). Then close the session: give a short recap (words spoken, cards reviewed, new terms learned, current streak) and, on its own line at the very end, emit:
+[SESSIONCOMPLETE]
+
+Apply the fluency-first correction rules throughout:
+${ENGLISH_FLUENCY_RULES}`;
+}
+
 function buildSystemPrompt(messages: Message[], lastMessage: string, mode?: Mode, simulationContext?: Simulation): string {
   const memory = getMemory();
   
@@ -296,6 +356,10 @@ function buildSystemPrompt(messages: Message[], lastMessage: string, mode?: Mode
     base += "\n\nCONTEXT: The user wants to learn programming. Always show code examples in code blocks. Give mini challenges after each concept. Ask what language they want to learn if not specified.";
   } else if (mode === 'logistics') {
     base += "\n\nCONTEXT: The user works in or wants to learn about logistics, supply chain, and transport. Use real industry examples. Teach Incoterms, freight types, WMS/TMS systems, KPIs. Connect everything to practical daily situations in logistics operations.";
+  } else if (mode === 'english') {
+    base += `\n\n${ENGLISH_FLUENCY_RULES}`;
+  } else if (mode === 'daily') {
+    base += buildDailyInstruction();
   } else if (mode === 'portuguese') {
     base += "\n\nCONTEXT: The user wants to learn European Portuguese (Portugal). ALWAYS use European Portuguese, never Brazilian. Start by asking their current level (A1/A2/B1/B2/C1/C2) if not known from memory. Then teach according to their level. Use the complete curriculum. Correct their Portuguese writing immediately. Use visual aids (tables, flashcards) for vocabulary. Suggest resources when appropriate.";
   } else if (mode === 'simulation' && simulationContext) {
@@ -320,6 +384,8 @@ RULES FOR THIS SIMULATION:
   }
 
   base += "\n\nWhen you decide a visual would help, include it in your response using this format:\n[VISUAL_START]\n\n your HTML/SVG visual here \n\n[VISUAL_END]\nThen continue with your text explanation after the visual block.";
+
+  base += `\n\n${FLASHCARD_INSTRUCTION}`;
 
   if (!memory) return base;
 

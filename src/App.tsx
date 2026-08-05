@@ -32,14 +32,17 @@ import {
   Globe,
   Languages,
   Trophy,
-  Code2
+  Code2,
+  Flame,
+  Layers,
+  RotateCcw
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import { Message, Mode, SessionLog, UserMemory, Simulation } from './types';
-import { 
-  sendMessageToVera, 
-  getSummary, 
+import {
+  sendMessageToVera,
+  getSummary,
   extractMemoryUpdates,
   correctEnglishText,
   generateStudyPlan,
@@ -49,6 +52,21 @@ import {
 } from './services/geminiService';
 import { getMemory, saveMemory, updateMemory, hasMemory } from './services/memoryService';
 import { WeeklyStats } from './types';
+import {
+  Flashcard,
+  saveFlashcard,
+  reviewCard,
+  getDueCards,
+  getStats as getFlashcardStats,
+  FlashcardStats
+} from './services/flashcardService';
+import {
+  getDailyState,
+  startSession,
+  completeSession,
+  addWordsSpoken,
+  DailyState
+} from './services/dailySessionService';
 
 const getStartOfWeek = () => {
   const now = new Date();
@@ -237,6 +255,23 @@ export default function App() {
   const callModeRef = useRef(false);
   const recognitionRef = useRef<any>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Daily session + flashcards state
+  const [dailyState, setDailyState] = useState<DailyState>(() => getDailyState());
+  const [cardStats, setCardStats] = useState<FlashcardStats>(() => getFlashcardStats());
+  const [showReviewModal, setShowReviewModal] = useState(false);
+  const [reviewQueue, setReviewQueue] = useState<Flashcard[]>([]);
+  const [reviewIndex, setReviewIndex] = useState(0);
+  const [reviewFlipped, setReviewFlipped] = useState(false);
+  const [reviewDone, setReviewDone] = useState(0); // cards graded this review session
+
+  const refreshDaily = () => {
+    setDailyState(getDailyState());
+    setCardStats(getFlashcardStats());
+  };
+
+  const countWords = (s: string) =>
+    s.trim().split(/\s+/).filter(Boolean).length;
 
   const [studyPlan, setStudyPlan] = useState<string | null>(() => {
     return localStorage.getItem('vera_study_plan');
@@ -578,10 +613,101 @@ export default function App() {
     }
   };
 
+  // Parse Vera's control tags ([FLASHCARD], [REVIEW], [STARTCALL], [SESSIONCOMPLETE]),
+  // run their side effects, and return the text with the tags stripped for display.
+  const extractControlTags = (text: string): string => {
+    let out = text;
+    let touched = false;
+
+    // [FLASHCARD]front|back|example|category[/FLASHCARD]
+    const fcRegex = /\[FLASHCARD\]([\s\S]*?)\[\/FLASHCARD\]/g;
+    let m: RegExpExecArray | null;
+    while ((m = fcRegex.exec(text)) !== null) {
+      const parts = m[1].split('|').map(s => s.trim());
+      const [front, back, example, category] = parts;
+      if (front && back) {
+        saveFlashcard({ front, back, example: example || undefined, category });
+        touched = true;
+      }
+    }
+    out = out.replace(fcRegex, '');
+
+    // [REVIEW]cardId|quality[/REVIEW] — grade a reviewed card (daily Phase 1)
+    const rvRegex = /\[REVIEW\]([\s\S]*?)\[\/REVIEW\]/g;
+    while ((m = rvRegex.exec(text)) !== null) {
+      const [id, q] = m[1].split('|').map(s => s.trim());
+      const quality = parseInt(q, 10);
+      if (id && !isNaN(quality)) {
+        reviewCard(id, quality);
+        touched = true;
+      }
+    }
+    out = out.replace(rvRegex, '');
+
+    // [STARTCALL] — kick off hands-free voice mode (daily Phase 2).
+    // Enabling call mode is enough: utterance.onend auto-starts listening after
+    // Vera finishes speaking. Only start manually if voice output is off (no onend).
+    if (/\[STARTCALL\]/.test(out)) {
+      out = out.replace(/\[STARTCALL\](\[\/STARTCALL\])?/g, '');
+      setCallMode(true);
+      if (!voiceEnabled) {
+        setTimeout(() => startListening(), 500);
+      }
+    }
+
+    // [SESSIONCOMPLETE] — finish the daily session (daily Phase 3)
+    if (/\[SESSIONCOMPLETE\]/.test(out)) {
+      out = out.replace(/\[SESSIONCOMPLETE\]/g, '');
+      completeSession();
+      setCallMode(false);
+      touched = true;
+    }
+
+    if (touched) refreshDaily();
+    return out.replace(/\n{3,}/g, '\n\n').trim();
+  };
+
+  const openReviewModal = () => {
+    setReviewQueue(getDueCards());
+    setReviewIndex(0);
+    setReviewFlipped(false);
+    setReviewDone(0);
+    setShowReviewModal(true);
+  };
+
+  // Self-graded review (Again/Hard/Good/Easy → SM-2 quality)
+  const gradeReview = (quality: number) => {
+    const card = reviewQueue[reviewIndex];
+    if (card) reviewCard(card.id, quality);
+    refreshDaily();
+    if (reviewIndex + 1 >= reviewQueue.length) {
+      setReviewDone(d => d + 1);
+      setReviewQueue([]); // triggers the "all done" view
+      setReviewIndex(0);
+      setReviewFlipped(false);
+    } else {
+      setReviewDone(d => d + 1);
+      setReviewIndex(i => i + 1);
+      setReviewFlipped(false);
+    }
+  };
+
   const handleSend = async (e?: React.FormEvent, overrideInput?: string) => {
     e?.preventDefault();
     const messageText = overrideInput || input;
     if (!messageText.trim() || isLoading) return;
+
+    // /review opens the flashcard review modal without contacting the model
+    if (messageText.trim().toLowerCase().startsWith('/review')) {
+      openReviewModal();
+      setInput('');
+      return;
+    }
+
+    // Count Adri's spoken words while the hands-free call is active (daily Phase 2)
+    if (mode === 'daily' && callMode) {
+      addWordsSpoken(countWords(messageText));
+    }
 
     if (isWelcomeScreen) setIsWelcomeScreen(false);
 
@@ -609,6 +735,7 @@ export default function App() {
     else if (messageText.startsWith('/business')) detectedMode = 'business';
     else if (messageText.startsWith('/coding')) detectedMode = 'coding';
     else if (messageText.startsWith('/logistics')) detectedMode = 'logistics';
+    else if (messageText.startsWith('/daily')) detectedMode = 'daily';
     else if (messageText.startsWith('/simulate')) {
       setShowSimulationPicker(true);
       setIsLoading(false);
@@ -618,6 +745,12 @@ export default function App() {
     
     if (detectedMode !== mode) setMode(detectedMode);
     updateProgress(detectedMode);
+
+    // Kick off a fresh daily session when /daily is invoked
+    if (messageText.startsWith('/daily')) {
+      startSession();
+      refreshDaily();
+    }
 
     // Update weekly stats
     setWeeklyStats(prev => ({
@@ -842,7 +975,10 @@ export default function App() {
 
     try {
       let responseText = await sendMessageToVera(finalHistory, detectedMode, activeSimulation || undefined);
-      
+
+      // Parse & run Vera's control tags (flashcards, review grades, call mode, session end)
+      responseText = extractControlTags(responseText);
+
       // Upgrade 2: Parse visuals
       let visualContent = undefined;
       if (responseText.includes('[VISUAL_START]') && responseText.includes('[VISUAL_END]')) {
@@ -961,6 +1097,7 @@ export default function App() {
       coding: { label: 'Coding', icon: Code, color: 'bg-teal-600/50 text-teal-100' },
       logistics: { label: 'Logistics', icon: Truck, color: 'bg-orange-600/50 text-orange-100' },
       simulation: { label: 'Simulation', icon: Trophy, color: 'bg-indigo-600 text-white shadow-lg' },
+      daily: { label: 'Daily Session', icon: Flame, color: 'bg-indigo-900/50 text-indigo-200' },
     };
     const { label, icon: Icon, color } = config[currentMode];
     return (
@@ -1132,6 +1269,21 @@ export default function App() {
         style={{ background: 'linear-gradient(180deg, #1a1a2e 0%, #16213e 100%)' }}
       >
         <div className="p-8 flex flex-col items-center text-center">
+          {/* Daily session — top of the sidebar, with streak badge */}
+          <button
+            onClick={() => handleSend(undefined, '/daily')}
+            className="w-full flex items-center justify-between gap-2 px-4 py-[12px] mb-6 text-white rounded-[14px] transition-all text-[13px] font-semibold shadow-[0_4px_15px_rgba(99,102,241,0.4)] hover:scale-[1.02] hover:brightness-110"
+            style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}
+          >
+            <span className="flex items-center gap-2">
+              <Flame size={18} />
+              Daily session
+            </span>
+            <span className="flex items-center gap-1 bg-black/25 rounded-full px-2 py-0.5 text-[11px] font-bold">
+              🔥 {dailyState.streak}
+            </span>
+          </button>
+
           {/* Live video panel */}
           <div
             className={`relative mb-4 overflow-hidden bg-zinc-900 transition-all duration-300 ${isSpeaking ? 'vera-ring-pulse' : ''}`}
@@ -1212,6 +1364,57 @@ export default function App() {
             <ProgressBar label="Habits" value={progress.habits} color="bg-amber-500" />
             <ProgressBar label="Culture" value={progress.culture} color="bg-emerald-500" />
             <ProgressBar label="Sports" value={progress.sports} color="bg-orange-500" />
+          </div>
+
+          {/* Daily streak + Flashcards widgets */}
+          <div className="w-full mt-8 px-2 space-y-3">
+            <div className="bg-zinc-900/50 rounded-2xl p-4 border border-zinc-800 text-left">
+              <div className="flex items-center gap-2 mb-1">
+                <Flame size={16} className="text-orange-400" />
+                <span className="text-[9px] uppercase tracking-widest text-zinc-500 font-bold">Daily streak</span>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-3xl font-black tracking-tighter text-white">{dailyState.streak}</span>
+                <span className="text-[11px] text-zinc-400 font-medium">days in a row</span>
+              </div>
+              {dailyState.todayCompleted ? (
+                <div className="mt-3 flex items-center gap-1.5 text-[11px] font-bold text-emerald-400">
+                  <CheckCircle2 size={13} /> Done today
+                </div>
+              ) : (
+                <button
+                  onClick={() => handleSend(undefined, '/daily')}
+                  className="w-full mt-3 py-2 rounded-xl text-[11px] font-bold text-white transition-all hover:brightness-110"
+                  style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}
+                >
+                  Start today's session
+                </button>
+              )}
+            </div>
+
+            <div className="bg-zinc-900/50 rounded-2xl p-4 border border-zinc-800 text-left">
+              <div className="flex items-center gap-2 mb-1">
+                <Layers size={16} className="text-indigo-400" />
+                <span className="text-[9px] uppercase tracking-widest text-zinc-500 font-bold">Flashcards</span>
+              </div>
+              <div className="flex items-baseline gap-2">
+                <span className="text-3xl font-black tracking-tighter text-white">{cardStats.dueToday}</span>
+                <span className="text-[11px] text-zinc-400 font-medium">due today</span>
+              </div>
+              <div className="text-[10px] text-zinc-500 mt-0.5">
+                {cardStats.total} total · {cardStats.mastered} mastered
+              </div>
+              {cardStats.dueToday > 0 ? (
+                <button
+                  onClick={openReviewModal}
+                  className="w-full mt-3 py-2 rounded-xl text-[11px] font-bold text-white bg-indigo-600 hover:bg-indigo-500 transition-all"
+                >
+                  Review now
+                </button>
+              ) : (
+                <div className="mt-3 text-[11px] text-zinc-500 font-medium">All caught up ✓</div>
+              )}
+            </div>
           </div>
 
           {studyPlan && (
@@ -1688,6 +1891,8 @@ export default function App() {
                             >
                               <div className="p-2 max-h-[400px] overflow-y-auto no-scrollbar">
                                 {[
+                                  { id: 'daily', label: 'Daily session', icon: '🔥', cmd: '/daily' },
+                                  { id: 'review', label: 'Review flashcards', icon: '🃏', cmd: '/review' },
                                   { id: 'english', label: 'English practice', icon: '🇺🇸', cmd: '/english' },
                                   { id: 'portuguese', label: 'Portuguese (Portugal)', icon: '🇵🇹', cmd: '/portuguese' },
                                   { id: 'habits', label: 'Habits & productivity', icon: '⚡', cmd: '/habits' },
@@ -1966,6 +2171,130 @@ export default function App() {
                 ))}
               </div>
             </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Flashcard Review Modal */}
+      <AnimatePresence>
+        {showReviewModal && (
+          <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center p-6 bg-[#1a1a2e]/95 backdrop-blur-md">
+            {/* Header / close */}
+            <div className="absolute top-6 right-6 flex items-center gap-4">
+              {reviewQueue.length > 0 && (
+                <span className="text-[11px] font-bold uppercase tracking-widest text-zinc-400">
+                  {reviewIndex + 1} / {reviewQueue.length}
+                </span>
+              )}
+              <button
+                onClick={() => { setShowReviewModal(false); refreshDaily(); }}
+                className="w-11 h-11 flex items-center justify-center bg-white/10 text-white rounded-full hover:bg-white/20 transition-all"
+              >
+                <X size={22} />
+              </button>
+            </div>
+
+            {reviewQueue.length === 0 ? (
+              // All caught up / finished
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="text-center text-white max-w-md"
+              >
+                <div className="w-20 h-20 rounded-full bg-emerald-500/20 flex items-center justify-center mx-auto mb-6">
+                  <CheckCircle2 size={40} className="text-emerald-400" />
+                </div>
+                <h3 className="text-3xl font-black tracking-tighter mb-2">
+                  {reviewDone > 0 ? 'Review complete!' : 'All caught up'}
+                </h3>
+                <p className="text-zinc-400 mb-8">
+                  {reviewDone > 0
+                    ? `You reviewed ${reviewDone} card${reviewDone === 1 ? '' : 's'}. Nice work.`
+                    : 'No flashcards are due right now. Come back later.'}
+                </p>
+                <button
+                  onClick={() => { setShowReviewModal(false); refreshDaily(); }}
+                  className="px-8 py-3 rounded-xl font-bold text-sm text-white transition-all hover:brightness-110"
+                  style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}
+                >
+                  Done
+                </button>
+              </motion.div>
+            ) : (
+              <div className="w-full max-w-xl flex flex-col items-center">
+                {/* Category chip */}
+                <div className="mb-6 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest bg-white/10 text-indigo-200">
+                  {reviewQueue[reviewIndex].category}
+                </div>
+
+                {/* Card with flip animation */}
+                <div className="w-full h-72 mb-8" style={{ perspective: 1200 }}>
+                  <motion.div
+                    className="relative w-full h-full"
+                    style={{ transformStyle: 'preserve-3d' }}
+                    animate={{ rotateY: reviewFlipped ? 180 : 0 }}
+                    transition={{ duration: 0.5 }}
+                  >
+                    {/* Front */}
+                    <div
+                      className="absolute inset-0 flex flex-col items-center justify-center rounded-3xl bg-white shadow-2xl p-8 text-center"
+                      style={{ backfaceVisibility: 'hidden' }}
+                    >
+                      <span className="text-[10px] uppercase tracking-widest text-zinc-400 font-bold mb-4">Prompt</span>
+                      <span className="text-3xl font-black tracking-tighter text-zinc-900">
+                        {reviewQueue[reviewIndex].front}
+                      </span>
+                    </div>
+                    {/* Back */}
+                    <div
+                      className="absolute inset-0 flex flex-col items-center justify-center rounded-3xl bg-indigo-600 text-white shadow-2xl p-8 text-center"
+                      style={{ backfaceVisibility: 'hidden', transform: 'rotateY(180deg)' }}
+                    >
+                      <span className="text-[10px] uppercase tracking-widest text-indigo-200 font-bold mb-3">Answer</span>
+                      <span className="text-2xl font-black tracking-tighter mb-3">
+                        {reviewQueue[reviewIndex].back}
+                      </span>
+                      {reviewQueue[reviewIndex].example && (
+                        <span className="text-sm text-indigo-100 italic leading-relaxed">
+                          "{reviewQueue[reviewIndex].example}"
+                        </span>
+                      )}
+                    </div>
+                  </motion.div>
+                </div>
+
+                {!reviewFlipped ? (
+                  <button
+                    onClick={() => setReviewFlipped(true)}
+                    className="px-8 py-3 rounded-xl font-bold text-sm text-white bg-white/10 hover:bg-white/20 transition-all flex items-center gap-2"
+                  >
+                    <RotateCcw size={16} />
+                    Show answer
+                  </button>
+                ) : (
+                  <motion.div
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="grid grid-cols-4 gap-2 w-full"
+                  >
+                    {[
+                      { label: 'Again', quality: 1, cls: 'bg-red-500 hover:bg-red-400' },
+                      { label: 'Hard', quality: 3, cls: 'bg-amber-500 hover:bg-amber-400' },
+                      { label: 'Good', quality: 4, cls: 'bg-emerald-500 hover:bg-emerald-400' },
+                      { label: 'Easy', quality: 5, cls: 'bg-blue-500 hover:bg-blue-400' },
+                    ].map(b => (
+                      <button
+                        key={b.label}
+                        onClick={() => gradeReview(b.quality)}
+                        className={`py-3 rounded-xl font-bold text-sm text-white transition-all ${b.cls}`}
+                      >
+                        {b.label}
+                      </button>
+                    ))}
+                  </motion.div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </AnimatePresence>
