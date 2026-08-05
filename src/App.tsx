@@ -109,6 +109,37 @@ const PREFERRED_VOICES: Record<string, string[]> = {
 // Old robotic Windows/legacy voices to avoid as a last resort.
 const OLD_VOICE_NAMES = ['Zira', 'David', 'Mark', 'Helena', 'Laura', 'Pablo', 'Helia', 'Hazel', 'George', 'Sabina', 'Raul'];
 
+// Cloud "Online (Natural)" voices load asynchronously and can be missing on the
+// very first utterance. Poll (and listen to onvoiceschanged) until one exists for
+// this language, or give up after maxWaitMs so we never block indefinitely.
+const waitForNaturalVoice = (lang: string, maxWaitMs = 3000): Promise<void> => {
+  return new Promise<void>((resolve) => {
+    const synth = window.speechSynthesis;
+    if (!synth) { resolve(); return; }
+
+    const hasNatural = () =>
+      synth.getVoices().some((v) => v.lang === lang && v.name.includes('Natural'));
+
+    if (hasNatural()) { resolve(); return; }
+
+    const start = Date.now();
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearInterval(timer);
+      synth.onvoiceschanged = null;
+      resolve();
+    };
+
+    // onvoiceschanged as a shortcut in case it fires before the next poll tick.
+    synth.onvoiceschanged = () => { if (hasNatural()) finish(); };
+    const timer = setInterval(() => {
+      if (hasNatural() || Date.now() - start >= maxWaitMs) finish();
+    }, 150);
+  });
+};
+
 const getStartOfWeek = () => {
   const now = new Date();
   const day = now.getDay();
@@ -583,6 +614,12 @@ export default function App() {
     }
   }, [isSpeaking]);
 
+  // Warm up the speech engine on mount: the first getVoices() call is what
+  // triggers Edge to start loading the cloud "Online (Natural)" voice list.
+  useEffect(() => {
+    if (window.speechSynthesis) window.speechSynthesis.getVoices();
+  }, []);
+
   // Pick the best voice for a language, strongly preferring modern
   // "Online (Natural)" voices over the old robotic ones (Zira, David, Helena...).
   const getVoice = (lang: string): SpeechSynthesisVoice | null => {
@@ -618,19 +655,6 @@ export default function App() {
     if (!window.speechSynthesis) return;
 
     window.speechSynthesis.cancel();
-    // Wait until the voice list is populated (voices load asynchronously).
-    await new Promise<void>(resolve => {
-      if (window.speechSynthesis.getVoices().length > 0) {
-        resolve();
-      } else {
-        window.speechSynthesis.onvoiceschanged = () => resolve();
-      }
-    });
-    // Cloud "Online (Natural)" voices arrive late. A short list (< 50) means the
-    // full set hasn't loaded yet, so give it a moment before choosing.
-    if (window.speechSynthesis.getVoices().length < 50) {
-      await new Promise(r => setTimeout(r, 700));
-    }
 
     // Clean markdown from text
     const cleanText = text
@@ -653,8 +677,15 @@ export default function App() {
       utterance.lang = 'es-ES';
     }
 
+    // Cloud "Online (Natural)" voices appear late — wait for one for this language
+    // before choosing, or the first utterance falls back to the old robotic engine.
+    const waitStart = Date.now();
+    await waitForNaturalVoice(utterance.lang);
+    const waited = Date.now() - waitStart;
+
+    const voices = window.speechSynthesis.getVoices();
     const selectedVoice = getVoice(utterance.lang);
-    console.log('[Vera voice]', selectedVoice?.name || 'ninguna');
+    console.log('[Vera voice]', selectedVoice?.name || 'ninguna', `(esperó ${waited}ms, ${voices.length} voces)`);
     if (selectedVoice) utterance.voice = selectedVoice;
 
     // Las voces "Online (Natural)" de Edge son de nube y no admiten rate/pitch:
