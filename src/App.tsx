@@ -35,7 +35,9 @@ import {
   Code2,
   Flame,
   Layers,
-  RotateCcw
+  RotateCcw,
+  Menu,
+  Smartphone
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -270,6 +272,12 @@ export default function App() {
   const [dailyState, setDailyState] = useState<DailyState>(() => getDailyState());
   const [cardStats, setCardStats] = useState<FlashcardStats>(() => getFlashcardStats());
   const [progressData, setProgressData] = useState<Record<string, ModuleProgress>>(() => getProgress());
+
+  // Mobile drawer + PWA install
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [deferredPrompt, setDeferredPrompt] = useState<any>(null);
+  const [installDismissed, setInstallDismissed] = useState(false);
+  const closeSidebar = () => setSidebarOpen(false);
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [reviewQueue, setReviewQueue] = useState<Flashcard[]>([]);
   const [reviewIndex, setReviewIndex] = useState(0);
@@ -398,6 +406,43 @@ export default function App() {
     }
   }, []);
 
+  // Capture the PWA install prompt so we can trigger it from our own button.
+  useEffect(() => {
+    const onBeforeInstall = (e: Event) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    };
+    const onInstalled = () => {
+      setDeferredPrompt(null);
+      setInstallDismissed(true);
+    };
+    window.addEventListener('beforeinstallprompt', onBeforeInstall);
+    window.addEventListener('appinstalled', onInstalled);
+    return () => {
+      window.removeEventListener('beforeinstallprompt', onBeforeInstall);
+      window.removeEventListener('appinstalled', onInstalled);
+    };
+  }, []);
+
+  const isStandalone =
+    typeof window !== 'undefined' &&
+    window.matchMedia &&
+    window.matchMedia('(display-mode: standalone)').matches;
+  const showInstallCard = !!deferredPrompt && !installDismissed && !isStandalone;
+
+  const handleInstall = async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    try {
+      await deferredPrompt.userChoice;
+    } catch {
+      // ignore
+    }
+    // Hide the card whether the user accepted or dismissed.
+    setDeferredPrompt(null);
+    setInstallDismissed(true);
+  };
+
   // Calendar days between an ISO date and today (0 = same day).
   const calendarDaysSince = (iso: string): number => {
     const from = new Date(iso);
@@ -443,6 +488,7 @@ export default function App() {
     setMessages([]);
     setMode('general');
     setError(null);
+    setSidebarOpen(false);
     if (hasMemory()) {
       // Vera opens the new session with a concrete proposal instead of a passive picker
       openWithProposal();
@@ -715,6 +761,7 @@ export default function App() {
     setReviewFlipped(false);
     setReviewDone(0);
     setShowReviewModal(true);
+    setSidebarOpen(false);
   };
 
   // Self-graded review (Again/Hard/Good/Easy → SM-2 quality)
@@ -1307,9 +1354,19 @@ export default function App() {
 
   return (
     <div className="flex h-screen bg-[#fafaf8] text-zinc-900 font-sans overflow-hidden">
-      {/* Sidebar */}
+      {/* Mobile drawer overlay */}
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/50 z-30 md:hidden"
+          onClick={closeSidebar}
+        />
+      )}
+
+      {/* Sidebar — static on desktop, sliding drawer on mobile */}
       <aside
-        className="w-[260px] h-screen bg-[#1a1a2e] text-white flex flex-col shrink-0 z-20 shadow-2xl border-r border-[#ffffff10]"
+        className={`w-[260px] h-screen bg-[#1a1a2e] text-white flex flex-col shrink-0 shadow-2xl border-r border-[#ffffff10]
+          fixed md:static top-0 left-0 z-40 transform transition-transform duration-300
+          ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0`}
         style={{ background: 'linear-gradient(180deg, #1a1a2e 0%, #16213e 100%)' }}
       >
         {/* Fixed zone (does not scroll): identity row + action buttons */}
@@ -1371,7 +1428,7 @@ export default function App() {
           {/* Action buttons row: Daily session + Start/End call */}
           <div className="flex items-center gap-2">
             <button
-              onClick={() => handleSend(undefined, '/daily')}
+              onClick={() => { closeSidebar(); handleSend(undefined, '/daily'); }}
               className="w-1/2 flex items-center justify-center gap-1.5 px-2 py-2 text-white rounded-[12px] transition-all text-[11px] font-semibold shadow-[0_4px_15px_rgba(99,102,241,0.4)] hover:brightness-110"
               style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}
             >
@@ -1444,7 +1501,7 @@ export default function App() {
                 </div>
               ) : (
                 <button
-                  onClick={() => handleSend(undefined, '/daily')}
+                  onClick={() => { closeSidebar(); handleSend(undefined, '/daily'); }}
                   className="w-full mt-3 py-2 rounded-xl text-[11px] font-bold text-white transition-all hover:brightness-110"
                   style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}
                 >
@@ -1565,12 +1622,30 @@ export default function App() {
               </AnimatePresence>
             </div>
           )}
+
+          {/* PWA install prompt card */}
+          {showInstallCard && (
+            <div className="w-full mt-8 px-2">
+              <div className="bg-zinc-900/50 rounded-2xl p-4 border border-zinc-800 text-left">
+                <div className="flex items-center gap-2 mb-3">
+                  <Smartphone size={16} className="text-indigo-400" />
+                  <span className="text-[12px] font-semibold text-zinc-200">Install Vera on your phone</span>
+                </div>
+                <button
+                  onClick={handleInstall}
+                  className="w-full min-h-[44px] py-2.5 rounded-xl text-[12px] font-bold text-white bg-indigo-600 hover:bg-indigo-500 transition-all"
+                >
+                  Install
+                </button>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="mt-auto p-6 space-y-2">
-          <button 
+          <button
             onClick={handleNewSession}
-            className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border border-[#ffffff30] hover:bg-[#ffffff10] text-white transition-all text-sm font-medium"
+            className="w-full flex items-center gap-3 px-4 py-3 min-h-[44px] rounded-xl border border-[#ffffff30] hover:bg-[#ffffff10] text-white transition-all text-sm font-medium"
           >
             <PlusCircle size={18} />
             New Session
@@ -1580,14 +1655,23 @@ export default function App() {
 
       {/* Main Area */}
       <main className="flex-1 flex flex-col relative">
-        <header className="h-20 border-b border-zinc-200/50 flex items-center px-8 bg-white/50 backdrop-blur-sm sticky top-0 z-10">
-          <div className="flex-1 flex items-center">
+        <header className="h-20 border-b border-zinc-200/50 flex items-center px-4 md:px-8 bg-white/50 backdrop-blur-sm sticky top-0 z-10">
+          {/* Hamburger — mobile only */}
+          <button
+            onClick={() => setSidebarOpen(true)}
+            className="md:hidden mr-2 w-11 h-11 flex items-center justify-center rounded-xl text-zinc-500 hover:bg-zinc-100 shrink-0"
+            aria-label="Open menu"
+          >
+            <Menu size={22} />
+          </button>
+
+          <div className="hidden md:flex flex-1 items-center">
             <h2 className="font-bold text-sm uppercase tracking-widest text-zinc-400">
               {isWelcomeScreen ? "Welcome" : mode}
             </h2>
           </div>
-          
-          <div className="flex items-center gap-1">
+
+          <div className="flex items-center gap-1 overflow-x-auto no-scrollbar flex-1 md:flex-none">
             {[
               { id: 'english', label: 'English', icon: Globe, color: '#3b82f6' },
               { id: 'portuguese', label: 'Português', icon: Languages, color: '#10b981' },
@@ -1600,9 +1684,9 @@ export default function App() {
               <button
                 key={m.id}
                 onClick={() => startMode(m.id as Mode)}
-                className={`group relative w-16 h-14 flex flex-col items-center justify-center rounded-xl transition-all duration-300 ${
-                  mode === m.id 
-                    ? 'shadow-md' 
+                className={`group relative shrink-0 w-14 md:w-16 h-14 flex flex-col items-center justify-center rounded-xl transition-all duration-300 ${
+                  mode === m.id
+                    ? 'shadow-md'
                     : 'hover:bg-zinc-100'
                 }`}
                 style={{ 
@@ -1684,7 +1768,7 @@ export default function App() {
               </AnimatePresence>
             </div>
           </div>
-          <div className="flex-1"></div>
+          <div className="hidden md:block flex-1"></div>
         </header>
 
         <div className="flex-1 relative overflow-hidden">
@@ -1881,7 +1965,10 @@ export default function App() {
                 </div>
 
                 {/* Input Area */}
-                <div className="p-8 bg-gradient-to-t from-[#fafaf8] via-[#fafaf8] to-transparent">
+                <div
+                  className="px-4 pt-4 pb-4 md:p-8 bg-gradient-to-t from-[#fafaf8] via-[#fafaf8] to-transparent"
+                  style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))' }}
+                >
                   <div className="max-w-3xl mx-auto">
                     {isListening && (
                       <motion.div 
@@ -2239,7 +2326,7 @@ export default function App() {
       {/* Flashcard Review Modal */}
       <AnimatePresence>
         {showReviewModal && (
-          <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center p-6 bg-[#1a1a2e]/95 backdrop-blur-md">
+          <div className="fixed inset-0 z-[100] flex flex-col items-center justify-center px-0 py-6 md:p-6 bg-[#1a1a2e]/95 backdrop-blur-md">
             {/* Header / close */}
             <div className="absolute top-6 right-6 flex items-center gap-4">
               {reviewQueue.length > 0 && (
@@ -2282,7 +2369,7 @@ export default function App() {
                 </button>
               </motion.div>
             ) : (
-              <div className="w-full max-w-xl flex flex-col items-center">
+              <div className="w-full max-w-xl flex flex-col items-center px-4">
                 {/* Category chip */}
                 <div className="mb-6 px-3 py-1 rounded-full text-[10px] font-black uppercase tracking-widest bg-white/10 text-indigo-200">
                   {reviewQueue[reviewIndex].category}
@@ -2327,7 +2414,7 @@ export default function App() {
                 {!reviewFlipped ? (
                   <button
                     onClick={() => setReviewFlipped(true)}
-                    className="px-8 py-3 rounded-xl font-bold text-sm text-white bg-white/10 hover:bg-white/20 transition-all flex items-center gap-2"
+                    className="px-8 py-3 min-h-[44px] rounded-xl font-bold text-sm text-white bg-white/10 hover:bg-white/20 transition-all flex items-center gap-2"
                   >
                     <RotateCcw size={16} />
                     Show answer
@@ -2347,7 +2434,7 @@ export default function App() {
                       <button
                         key={b.label}
                         onClick={() => gradeReview(b.quality)}
-                        className={`py-3 rounded-xl font-bold text-sm text-white transition-all ${b.cls}`}
+                        className={`py-3 min-h-[44px] rounded-xl font-bold text-sm text-white transition-all ${b.cls}`}
                       >
                         {b.label}
                       </button>

@@ -1,0 +1,14 @@
+{
+  "name": "Vera — Personal Tutor",
+  "short_name": "Vera",
+  "description": "Tu tutora personal de inglés, portugués, logística y más",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1a1a2e",
+  "theme_color": "#6366f1",
+  "icons": [
+    { "src": "/vera-avatar.jpg", "sizes": "512x512", "type": "image/jpeg", "purpose": "any" },
+    { "src": "/vera-avatar.jpg", "sizes": "192x192", "type": "image/jpeg", "purpose": "any" }
+  ]
+}

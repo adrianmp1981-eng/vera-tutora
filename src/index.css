@@ -15,3 +15,12 @@
 .vera-ring-pulse {
   animation: vera-ring-pulse 2s infinite;
 }
+
+/* Hide scrollbars (used for horizontal tab strips and menus) */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
