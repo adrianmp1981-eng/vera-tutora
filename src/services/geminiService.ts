@@ -1,4 +1,3 @@
-import { GoogleGenAI, Type } from "@google/genai";
 import { Message, Mode, UserMemory, Simulation } from "../types";
 import { getMemory } from "./memoryService";
 import { getDueCards } from "./flashcardService";
@@ -502,10 +501,47 @@ const VERA_IMAGE_PROMPT =
   "Confident, approachable, intelligent. Photorealistic, 85mm lens. " +
   "No text, no watermarks.";
 
-const getAI = () => new GoogleGenAI({ apiKey: import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY || "" });
+export interface GeminiRequest {
+  kind?: 'generateContent' | 'generateImages' | 'generateVideos';
+  model: string;
+  contents?: any;
+  config?: any;
+  prompt?: string;
+  image?: any;
+}
+
+/**
+ * All Gemini traffic goes through our serverless proxy (/api/gemini), so the
+ * API key never reaches the browser. Keeps the { text } response shape that the
+ * rest of this file relies on.
+ */
+async function callGemini(payload: GeminiRequest): Promise<any> {
+  const res = await fetch('/api/gemini', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+
+  let data: any = null;
+  try { data = await res.json(); } catch { data = null; }
+
+  if (!res.ok) {
+    const isOwnRateLimit = data?.error === 'RATE_LIMIT';
+    const err: any = new Error(
+      isOwnRateLimit
+        ? (data?.message || 'Demasiadas peticiones. Espera un minuto e inténtalo de nuevo.')
+        : (data?.message || `Gemini request failed (${res.status}).`)
+    );
+    err.status = res.status;
+    err.code = data?.error;
+    err.rateLimited = isOwnRateLimit;
+    throw err;
+  }
+
+  return data || {};
+}
 
 export async function sendMessageToVera(messages: Message[], currentMode: Mode, simulationContext?: Simulation): Promise<string> {
-  const ai = getAI();
   const lastMessage = messages[messages.length - 1]?.text || "";
   
   // Optimization: Reduce history sent to API (last 10 messages, max 500 chars each)
@@ -532,30 +568,34 @@ export async function sendMessageToVera(messages: Message[], currentMode: Mode, 
       setTimeout(() => reject(new Error('Vera tardó demasiado. Intenta de nuevo.')), 15000)
     );
 
-    const responsePromise = ai.models.generateContent({
+    const responsePromise = callGemini({
       model: MODELS.chat,
       contents: [...history, { role: "user", parts: [{ text: visualPrompt }] }],
-      config: { 
-        systemInstruction: buildSystemPrompt(messages, lastMessage, currentMode, simulationContext), 
-        temperature: 0.5 
+      config: {
+        systemInstruction: buildSystemPrompt(messages, lastMessage, currentMode, simulationContext),
+        temperature: 0.5
       },
     });
 
     const response = await Promise.race([responsePromise, timeoutPromise]);
     return response.text || "Sorry, I could not process that. Try again.";
-  } catch (error) {
+  } catch (error: any) {
     console.error("Chat error:", error);
     if (error instanceof Error && error.message === 'Vera tardó demasiado. Intenta de nuevo.') {
       throw error;
     }
-    throw new Error("Vera no pudo responder. Revisa tu API key.");
+    // Surface our own rate limit and Gemini quota (429) so the user sees the real reason.
+    if (error?.rateLimited) throw error;
+    if (error?.status === 429) {
+      throw new Error("Vera está recibiendo demasiadas peticiones ahora mismo. Espera un momento e inténtalo de nuevo.");
+    }
+    throw new Error("Vera no pudo responder. Inténtalo de nuevo en un momento.");
   }
 }
 
 export async function searchResources(query: string): Promise<string> {
-  const ai = getAI();
   try {
-    const response = await ai.models.generateContent({
+    const response = await callGemini({
       model: "gemini-flash-latest",
       contents: [{ parts: [{ text: `Search for the best current resources for: "${query}". 
       Include: book titles with authors, free online resources with URLs, YouTube channels, podcasts, apps, and official exam information. 
@@ -576,10 +616,9 @@ export async function searchResources(query: string): Promise<string> {
 }
 
 export async function getSummary(messages: Message[]): Promise<string> {
-  const ai = getAI();
   const history = messages.map((m) => ({ role: m.role, parts: [{ text: m.text }] }));
   try {
-    const response = await ai.models.generateContent({
+    const response = await callGemini({
       model: MODELS.summary,
       contents: [...history, { role: "user", parts: [{ text: "Summarize what we worked on today in clear bullet points. Be direct." }] }],
       config: { systemInstruction: "You are Vera. Summarize the session directly." },
@@ -654,9 +693,8 @@ HARD RULES:
 - NEVER ask an open-ended question like "what do you want to do today?".
 - Output ONLY the greeting text, no quotes, no preamble.`;
 
-  const ai = getAI();
   try {
-    const response = await ai.models.generateContent({
+    const response = await callGemini({
       model: MODELS.summary,
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
@@ -674,14 +712,14 @@ HARD RULES:
 export async function generateVeraPortrait(): Promise<string | null> {
   const cached = localStorage.getItem(PORTRAIT_CACHE_KEY);
   if (cached) return cached;
-  const ai = getAI();
   try {
-    const response = await ai.models.generateImages({
+    const response = await callGemini({
+      kind: 'generateImages',
       model: MODELS.image,
       prompt: VERA_IMAGE_PROMPT,
       config: { numberOfImages: 1, aspectRatio: "1:1" },
     });
-    const b64 = response.generatedImages?.[0]?.image?.imageBytes;
+    const b64 = response.imageBytes;
     if (!b64) return null;
     const dataUrl = `data:image/png;base64,${b64}`;
     try { localStorage.setItem(PORTRAIT_CACHE_KEY, dataUrl); } catch {}
@@ -697,7 +735,6 @@ export function clearVeraPortraitCache(): void {
 }
 
 export async function generateSimulationContext(simulation: Simulation): Promise<string> {
-  const ai = getAI();
   const prompt = `You are starting a role-play simulation.
 Simulation: ${simulation.title}
 Your Role: ${simulation.veraRole}
@@ -708,7 +745,7 @@ Language: ${simulation.language}
 Start the simulation as your character. Give the opening line to set the scene. Stay in character.`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await callGemini({
       model: MODELS.chat,
       contents: [{ parts: [{ text: prompt }] }],
       config: { temperature: 0.7 },
@@ -721,7 +758,6 @@ Start the simulation as your character. Give the opening line to set the scene. 
 }
 
 export async function extractMemoryUpdates(messages: Message[]): Promise<Partial<UserMemory> | null> {
-  const ai = getAI();
   const history = messages.map((m) => `${m.role}: ${m.text}`).join("\n");
   
   const prompt = `Analyze the following conversation between Vera (tutor) and a user. 
@@ -733,17 +769,17 @@ CONVERSATION:
 ${history}`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await callGemini({
       model: MODELS.summary,
       contents: [{ parts: [{ text: prompt }] }],
-      config: { 
+      config: {
         responseMimeType: "application/json",
         responseSchema: {
-          type: Type.OBJECT,
+          type: "OBJECT",
           properties: {
-            weaknesses: { type: Type.ARRAY, items: { type: Type.STRING } },
-            strengths: { type: Type.ARRAY, items: { type: Type.STRING } },
-            notes: { type: Type.ARRAY, items: { type: Type.STRING } },
+            weaknesses: { type: "ARRAY", items: { type: "STRING" } },
+            strengths: { type: "ARRAY", items: { type: "STRING" } },
+            notes: { type: "ARRAY", items: { type: "STRING" } },
           },
           required: ["weaknesses", "strengths", "notes"],
         }
@@ -760,7 +796,6 @@ ${history}`;
 }
 
 export async function correctEnglishText(text: string): Promise<{hasErrors: boolean, corrected: string, explanation: string, errorType?: string} | null> {
-  const ai = getAI();
   const prompt = `You are an English writing coach. Analyze this text for grammar, spelling, and style errors. 
 If there are errors, return ONLY a JSON object with: 
 - hasErrors (boolean)
@@ -773,18 +808,18 @@ If the text is correct, return {hasErrors: false, corrected: text, explanation: 
 Text to analyze: ${text}`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await callGemini({
       model: MODELS.chat,
       contents: [{ parts: [{ text: prompt }] }],
-      config: { 
+      config: {
         responseMimeType: "application/json",
         responseSchema: {
-          type: Type.OBJECT,
+          type: "OBJECT",
           properties: {
-            hasErrors: { type: Type.BOOLEAN },
-            corrected: { type: Type.STRING },
-            explanation: { type: Type.STRING },
-            errorType: { type: Type.STRING },
+            hasErrors: { type: "BOOLEAN" },
+            corrected: { type: "STRING" },
+            explanation: { type: "STRING" },
+            errorType: { type: "STRING" },
           },
           required: ["hasErrors", "corrected", "explanation"],
         }
@@ -801,7 +836,6 @@ Text to analyze: ${text}`;
 }
 
 export async function generateStudyPlan(answers: string[], userMemory: UserMemory | null): Promise<string> {
-  const ai = getAI();
   const profile = userMemory ? `
 USER PROFILE:
 Name: ${userMemory.name}
@@ -832,7 +866,7 @@ The plan should be in Markdown format and include:
 Keep the tone warm, direct, and professional. Use bullet points and bold text for clarity.`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await callGemini({
       model: MODELS.chat,
       contents: [{ parts: [{ text: prompt }] }],
       config: { temperature: 0.7 },
@@ -845,7 +879,6 @@ Keep the tone warm, direct, and professional. Use bullet points and bold text fo
 }
 
 export async function generateWeeklyReport(stats: any, memory: UserMemory | null, recentMessages: Message[]): Promise<string> {
-  const ai = getAI();
   const history = recentMessages.map((m) => `${m.role}: ${m.text}`).join("\n");
   const profile = memory ? `
 USER PROFILE:
@@ -879,7 +912,7 @@ The report should be in Markdown format and include:
 Use icons, bullet points, and bold text for a professional and encouraging look.`;
 
   try {
-    const response = await ai.models.generateContent({
+    const response = await callGemini({
       model: MODELS.chat,
       contents: [{ parts: [{ text: prompt }] }],
       config: { temperature: 0.7 },
@@ -892,23 +925,17 @@ Use icons, bullet points, and bold text for a professional and encouraging look.
 }
 
 export async function generateVeraVideo(imageB64: string, prompt: string): Promise<string | null> {
-  const ai = getAI();
   try {
     const base64Data = imageB64.split(",")[1];
-    let operation = await ai.models.generateVideos({
+    // Video render (polling + fetch) runs on the server; the key never leaves it.
+    const response = await callGemini({
+      kind: 'generateVideos',
       model: "veo-2.0-generate-001",
       prompt: `Vera, a 28-year-old Californian woman, speaking naturally to camera. Soft lighting, neutral background. ${prompt}`,
       image: { imageBytes: base64Data, mimeType: "image/png" },
       config: { numberOfVideos: 1, resolution: "720p", aspectRatio: "1:1" },
     });
-    while (!operation.done) {
-      await new Promise(r => setTimeout(r, 5000));
-      operation = await ai.operations.getVideosOperation({ operation });
-    }
-    const uri = operation.response?.generatedVideos?.[0]?.video?.uri;
-    if (!uri) return null;
-    const videoResponse = await fetch(uri, { headers: { "x-goog-api-key": import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY || "" } });
-    return URL.createObjectURL(await videoResponse.blob());
+    return response.videoBase64 || null;
   } catch (error) {
     return null;
   }
