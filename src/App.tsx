@@ -74,7 +74,7 @@ import {
   getCoverage,
 } from './services/curriculumService';
 import { getMemory, saveMemory, updateMemory, hasMemory } from './services/memoryService';
-import { detectLanguage, parseLanguageTags, stripLanguageTags, getBaseLang, mergeShortForeignSegments } from './services/voiceLang';
+import { detectLanguage, parseLanguageTags, stripLanguageTags, getBaseLang, mergeShortForeignSegments, chunkForSpeech } from './services/voiceLang';
 import { WeeklyStats } from './types';
 import {
   Flashcard,
@@ -145,24 +145,6 @@ const cleanSpeechText = (text: string): string =>
     .replace(/`.*?`/g, '')
     .trim();
 
-// Limita el total de caracteres hablados repartiéndolos entre segmentos, para no
-// pronunciar mensajes larguísimos (el límite de ~500 chars que había antes).
-const capSpeechSegments = (
-  segments: Array<{ text: string; lang: string }>,
-  limit: number
-): Array<{ text: string; lang: string }> => {
-  const out: Array<{ text: string; lang: string }> = [];
-  let used = 0;
-  for (const s of segments) {
-    if (used >= limit) break;
-    const remaining = limit - used;
-    const text = s.text.length > remaining ? s.text.slice(0, remaining) : s.text;
-    out.push({ text, lang: s.lang });
-    used += text.length;
-  }
-  return out;
-};
-
 // Cloud "Online (Natural)" voices load asynchronously and can be missing on the
 // very first utterance. Poll (and listen to onvoiceschanged) until one exists for
 // this language, or give up after maxWaitMs so we never block indefinitely.
@@ -193,6 +175,31 @@ const waitForNaturalVoice = (lang: string, maxWaitMs = 3000): Promise<void> => {
     }, 150);
   });
 };
+
+// La primera palabra real a veces se corta porque el motor TTS aún no está activo.
+// Una utterance de calentamiento muda (' ', volume 0) lo despierta. Resuelve en
+// cuanto arranca (motor ya activo) o al terminar/errar, con tope de 300ms para no
+// bloquear. NO tocar pitch/rate (rompen las voces Natural).
+const warmUpVoice = (voice: SpeechSynthesisVoice | null, lang: string): Promise<void> =>
+  new Promise<void>((resolve) => {
+    try {
+      const synth = window.speechSynthesis;
+      if (!synth) { resolve(); return; }
+      const u = new SpeechSynthesisUtterance(' ');
+      u.volume = 0;
+      u.lang = lang;
+      if (voice) u.voice = voice;
+      let done = false;
+      const finish = () => { if (!done) { done = true; resolve(); } };
+      u.onstart = finish;
+      u.onend = finish;
+      u.onerror = finish;
+      synth.speak(u);
+      setTimeout(finish, 300);
+    } catch {
+      resolve();
+    }
+  });
 
 const getStartOfWeek = () => {
   const now = new Date();
@@ -412,6 +419,8 @@ export default function App() {
   // Cada llamada a speakText incrementa este contador; los onend encadenados
   // comprueban que siguen en la secuencia vigente para no avanzar una cola cancelada.
   const speechSeqRef = useRef(0);
+  // Duración del último API de Vera (ms), para la instrumentación de latencia en speakText.
+  const apiMsRef = useRef<number | null>(null);
 
   // Idioma de escucha del micrófono. null = automático (lo decide la conversación).
   const [listeningLang, setListeningLang] = useState<string | null>(() =>
@@ -773,6 +782,7 @@ export default function App() {
     if (!window.speechSynthesis) return;
 
     window.speechSynthesis.cancel();
+    const speakEntry = Date.now();
 
     // Quita bloques no hablables del texto completo, trocea por idioma respetando
     // las etiquetas (base = baseLang), y limpia markdown inline por segmento.
@@ -785,8 +795,12 @@ export default function App() {
     // suena más natural que frenar para cambiar de voz por "supply chain".
     if (baseLang) segments = mergeShortForeignSegments(segments, baseLang);
 
-    // Límite total de ~500 chars repartido entre segmentos.
-    segments = capSpeechSegments(segments, 500);
+    // Trocea cada segmento en frases de ~200 chars (corte en límite de frase o, si
+    // no, en coma/espacio; nunca a mitad de palabra). Se habla TODO el texto: sin
+    // tope global que recortara los mensajes largos.
+    segments = segments.flatMap((s) =>
+      chunkForSpeech(s.text, 200).map((t) => ({ text: t, lang: s.lang }))
+    );
     if (segments.length === 0) return;
 
     console.log('[Vera voice]', segments.map((s) => `${s.lang}:${s.text.slice(0, 30)}`));
@@ -798,8 +812,22 @@ export default function App() {
     // para cada idioma presente antes de empezar, o la primera utterance cae al
     // motor robótico. Si otra llamada nos releva mientras esperamos, abortamos.
     const langs = [...new Set(segments.map((s) => s.lang))];
+    const voiceWaitStart = Date.now();
     await Promise.all(langs.map((l) => waitForNaturalVoice(l)));
+    const voiceWaitMs = Date.now() - voiceWaitStart;
     if (mySeq !== speechSeqRef.current) return;
+
+    // Calentamiento: despierta el motor antes de la primera utterance real para que
+    // no se coma la primera palabra (tope de 300ms, ver warmUpVoice).
+    await warmUpVoice(getVoice(segments[0].lang), segments[0].lang);
+    if (mySeq !== speechSeqRef.current) return;
+
+    // Instrumentación de latencia (aún sin optimizar nada).
+    console.log(
+      '[Vera timing]',
+      `api=${apiMsRef.current != null ? apiMsRef.current : '-'}ms voice-wait=${voiceWaitMs}ms speak-start=${Date.now() - speakEntry}ms`
+    );
+    apiMsRef.current = null;
 
     // Encola TODAS las utterances de golpe: la cola nativa del navegador las
     // reproduce con hueco mínimo, sin el corte que dejaba esperar al onend de una
@@ -1213,7 +1241,9 @@ export default function App() {
       setActiveSimulation(null);
       
       try {
+        const apiStart = Date.now();
         const response = await sendMessageToVera([...messages, userMessage], 'simulation', activeSimulation || undefined);
+        apiMsRef.current = Date.now() - apiStart;
         const veraResponse: Message = {
           id: generateId(),
           role: 'model',
@@ -1450,7 +1480,9 @@ export default function App() {
     }
 
     try {
+      const apiStart = Date.now();
       let responseText = await sendMessageToVera(finalHistory, detectedMode, activeSimulation || undefined, teachingLang);
+      apiMsRef.current = Date.now() - apiStart;
 
       // Parse & run Vera's control tags (flashcards, review grades, call mode, session end)
       responseText = extractControlTags(responseText);

@@ -5,7 +5,11 @@ import {
   stripLanguageTags,
   getBaseLang,
   mergeShortForeignSegments,
+  chunkForSpeech,
 } from './voiceLang';
+
+// All word/number tokens, order-preserving — used to prove no text is lost.
+const tokens = (s: string): string[] => s.match(/\p{L}+|\d+/gu) || [];
 
 // A tag token: [EN] [/EN] [ES] [/ES] [PT] [/PT]. The voice must NEVER speak one
 // and the chat must NEVER show one.
@@ -84,6 +88,38 @@ describe('parseLanguageTags with an explicit base language', () => {
     expect(segs[0].lang).toBe('es-ES');
     expect(segs[1].lang).toBe('en-US');
     expect(segs[1].text).toContain('Delivered Duty Paid');
+  });
+});
+
+describe('chunkForSpeech', () => {
+  it('speaks ALL of a >500-char text: chunks cover it with no lost words', () => {
+    // ~1100 chars across 20 sentences (the old 500-char cap would have dropped ~half).
+    const input = Array.from({ length: 20 }, (_, i) =>
+      `Esta es la frase número ${i + 1} de la prueba de troceo larga.`
+    ).join(' ');
+    expect(input.length).toBeGreaterThan(500);
+
+    const chunks = chunkForSpeech(input, 200);
+
+    // Every word survives, in order.
+    expect(tokens(chunks.join(' '))).toEqual(tokens(input));
+    // Chunks respect the target length (sentences here are all < 200).
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(200);
+    expect(chunks.length).toBeGreaterThan(1);
+  });
+
+  it('breaks an over-long sentence with no periods on commas/spaces, never mid-word', () => {
+    const input = Array.from({ length: 60 }, (_, i) => `palabra${i + 1}`).join(' ');
+    expect(input.length).toBeGreaterThan(200);
+
+    const chunks = chunkForSpeech(input, 200);
+
+    expect(tokens(chunks.join(' '))).toEqual(tokens(input));
+    for (const c of chunks) expect(c.length).toBeLessThanOrEqual(200);
+  });
+
+  it('keeps a short text as a single chunk and strips leading orphan punctuation', () => {
+    expect(chunkForSpeech(':\n\n\nHola equipo, buenos días.', 200)).toEqual(['Hola equipo, buenos días.']);
   });
 });
 

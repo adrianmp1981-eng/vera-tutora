@@ -189,6 +189,69 @@ export const parseLanguageTags = (text: string, baseLang?: string): LangSegment[
 
 const wordCount = (s: string): number => (s.match(/\p{L}+/gu) || []).length;
 
+// Strip leading orphan punctuation and line breaks (e.g. ":\n\n\n") that appear
+// at the start of a chunk; the voice should not read them.
+const cleanChunkStart = (s: string): string => s.replace(/^[\s:;,.]+/, '').trim();
+
+/**
+ * Split a spoken segment into chunks of about `maxLen` chars WITHOUT dropping any
+ * text. Cuts always land on a sentence boundary; when a single sentence is longer
+ * than `maxLen`, on the last comma or space before the limit — never mid-word (if
+ * there is no break before the limit it extends to the next space). Each chunk has
+ * its leading orphan punctuation/newlines cleaned.
+ */
+export const chunkForSpeech = (text: string, maxLen = 200): string[] => {
+  const cleaned = cleanChunkStart(text);
+  if (!cleaned) return [];
+  if (cleaned.length <= maxLen) return [cleaned];
+
+  // Break an over-long unit on the last comma/space before maxLen (never a word).
+  const breakLong = (input: string): string[] => {
+    const pieces: string[] = [];
+    let rest = input.trim();
+    while (rest.length > maxLen) {
+      let end: number;
+      const comma = rest.lastIndexOf(',', maxLen);
+      const space = rest.lastIndexOf(' ', maxLen);
+      if (comma > 0) {
+        end = comma + 1; // keep the comma with the piece
+      } else if (space > 0) {
+        end = space;
+      } else {
+        // No break before the limit: extend to the next space so no word is cut.
+        const next = rest.indexOf(' ', maxLen);
+        end = next > 0 ? next : rest.length;
+      }
+      pieces.push(rest.slice(0, end).trim());
+      rest = rest.slice(end).trim();
+    }
+    if (rest) pieces.push(rest);
+    return pieces;
+  };
+
+  // Sentence units: split after . ! ? : + whitespace, and on line breaks.
+  const sentences = cleaned.split(/(?<=[.!?:])\s+|\n+/).map((s) => s.trim()).filter(Boolean);
+
+  const chunks: string[] = [];
+  let current = '';
+  for (const sentence of sentences) {
+    if (sentence.length > maxLen) {
+      if (current) { chunks.push(current); current = ''; }
+      for (const piece of breakLong(sentence)) chunks.push(piece);
+      continue;
+    }
+    if (current && current.length + 1 + sentence.length > maxLen) {
+      chunks.push(current);
+      current = sentence;
+    } else {
+      current = current ? `${current} ${sentence}` : sentence;
+    }
+  }
+  if (current) chunks.push(current);
+
+  return chunks.map(cleanChunkStart).filter(Boolean);
+};
+
 /**
  * Absorb short foreign snippets into the base voice so the voice does not brake
  * for them. A tiny foreign segment (≤3 words) that is surrounded by base-language
