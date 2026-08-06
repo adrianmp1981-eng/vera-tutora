@@ -109,10 +109,11 @@ const PREFERRED_VOICES: Record<string, string[]> = {
 // Old robotic Windows/legacy voices to avoid as a last resort.
 const OLD_VOICE_NAMES = ['Zira', 'David', 'Mark', 'Helena', 'Laura', 'Pablo', 'Helia', 'Hazel', 'George', 'Sabina', 'Raul'];
 
-// Detecta el idioma del TEXTO que se va a pronunciar (no del modo activo), para
-// que la voz coincida con el idioma real. Así el saludo en español no suena con
-// acento inglés aunque el modo restaurado sea 'english', y se arreglan las mezclas.
-const detectLanguage = (text: string): 'en-US' | 'es-ES' | 'pt-PT' => {
+const LANG_FLAG: Record<string, string> = { 'en-US': '🇺🇸', 'es-ES': '🇪🇸', 'pt-PT': '🇵🇹' };
+
+// Puntúa un texto en cada idioma: palabras frecuentes (1 punto) + caracteres
+// exclusivos (3 puntos porque son señales muy fuertes).
+const languageScores = (text: string): { 'en-US': number; 'es-ES': number; 'pt-PT': number } => {
   const lower = text.toLowerCase();
 
   const PT_WORDS = ['não', 'você', 'obrigado', 'muito', 'está', 'são', 'também', 'então', 'agora', 'aqui'];
@@ -130,15 +131,59 @@ const detectLanguage = (text: string): 'en-US' | 'es-ES' | 'pt-PT' => {
     return matches ? matches.length : 0;
   };
 
-  // Caracteres exclusivos: señales muy fuertes, valen 3 puntos cada aparición.
-  const ptScore = countWords(PT_WORDS) + countChars(/[ãõç]/gi) * 3;
-  const esScore = countWords(ES_WORDS) + countChars(/[¿¡ñ]/gi) * 3;
-  const enScore = countWords(EN_WORDS);
+  return {
+    'pt-PT': countWords(PT_WORDS) + countChars(/[ãõç]/gi) * 3,
+    'es-ES': countWords(ES_WORDS) + countChars(/[¿¡ñ]/gi) * 3,
+    'en-US': countWords(EN_WORDS),
+  };
+};
 
-  if (ptScore > esScore && ptScore > enScore) return 'pt-PT';
-  if (esScore > ptScore && esScore > enScore) return 'es-ES';
+// Detecta el idioma del TEXTO (no del modo activo), para que la voz coincida con
+// el idioma real. Así el saludo en español no suena con acento inglés aunque el
+// modo restaurado sea 'english', y se arreglan las mezclas de idioma.
+const detectLanguage = (text: string): 'en-US' | 'es-ES' | 'pt-PT' => {
+  const s = languageScores(text);
+  if (s['pt-PT'] > s['es-ES'] && s['pt-PT'] > s['en-US']) return 'pt-PT';
+  if (s['es-ES'] > s['pt-PT'] && s['es-ES'] > s['en-US']) return 'es-ES';
   // Empate a cero (o inglés gana) → 'en-US'.
   return 'en-US';
+};
+
+// Trocea un texto mixto en segmentos etiquetados por idioma, para poder leer cada
+// trozo con su voz. Los mensajes de traducción de Vera mezclan idiomas ("How would
+// you say this: 'Estamos teniendo retrasos.'") y una sola voz los destroza.
+const splitByLanguage = (text: string): Array<{ text: string; lang: string }> => {
+  // Fronteras: saltos de línea, fin de frase (. ! ? :) y comillas de apertura/cierre
+  // (las citas suelen marcar el cambio de idioma). Se descartan los trozos sin letras.
+  const rawSegments = text
+    .split(/\n+|(?<=[.!?:])\s+|(?=["“”«»])|(?<=["“”«»])/g)
+    .map((s) => s.trim())
+    .filter((s) => /\p{L}/u.test(s));
+
+  const wordCount = (s: string): number => (s.match(/\p{L}+/gu) || []).length;
+
+  const merged: Array<{ text: string; lang: string }> = [];
+  for (const seg of rawSegments) {
+    const scores = languageScores(seg);
+    const maxScore = Math.max(scores['en-US'], scores['es-ES'], scores['pt-PT']);
+    let lang: string = detectLanguage(seg);
+
+    // Segmento muy corto y sin señales claras → hereda el idioma del anterior
+    // en vez de arriesgar una detección mala.
+    if (wordCount(seg) < 4 && maxScore === 0 && merged.length > 0) {
+      lang = merged[merged.length - 1].lang;
+    }
+
+    // Fusiona segmentos consecutivos del mismo idioma para no cortar la prosodia.
+    const last = merged[merged.length - 1];
+    if (last && last.lang === lang) {
+      last.text += ' ' + seg;
+    } else {
+      merged.push({ text: seg, lang });
+    }
+  }
+
+  return merged;
 };
 
 // Cloud "Online (Natural)" voices load asynchronously and can be missing on the
@@ -359,6 +404,16 @@ export default function App() {
   const callModeRef = useRef(false);
   const recognitionRef = useRef<any>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Cada llamada a speakText incrementa este contador; los onend encadenados
+  // comprueban que siguen en la secuencia vigente para no avanzar una cola cancelada.
+  const speechSeqRef = useRef(0);
+
+  // Idioma de escucha del micrófono. null = automático (lo decide la conversación).
+  const [listeningLang, setListeningLang] = useState<string | null>(() =>
+    localStorage.getItem('vera_listening_lang')
+  );
+  const langLongPressRef = useRef(false);
+  const langTimerRef = useRef<any>(null);
 
   // Daily session + flashcards state
   const [dailyState, setDailyState] = useState<DailyState>(() => getDailyState());
@@ -623,11 +678,19 @@ export default function App() {
   }, [voiceEnabled]);
 
   const stopSpeaking = () => {
+    // Invalida cualquier cola encadenada en curso para que sus onend no reanuden.
+    speechSeqRef.current++;
     if (window.speechSynthesis) {
       window.speechSynthesis.cancel();
     }
     setIsSpeaking(false);
   };
+
+  // Persiste la preferencia manual de idioma de escucha.
+  useEffect(() => {
+    if (listeningLang) localStorage.setItem('vera_listening_lang', listeningLang);
+    else localStorage.removeItem('vera_listening_lang');
+  }, [listeningLang]);
 
   // Keep the ref in sync so async callbacks (utterance.onend) read the latest value
   useEffect(() => {
@@ -698,44 +761,103 @@ export default function App() {
       .replace(/\[VISUAL_START\][\s\S]*?\[VISUAL_END\]/g, '')
       .substring(0, 500); // limit to 500 chars to avoid very long speech
 
-    const utterance = new SpeechSynthesisUtterance(cleanText);
+    if (!cleanText.trim()) return;
 
-    // El idioma sale del TEXTO ya limpio, no del modo: así la voz coincide con
-    // el idioma real de la respuesta (arregla el saludo y las mezclas de idioma).
-    utterance.lang = detectLanguage(cleanText);
+    // El idioma sale del TEXTO, no del modo. Y como los mensajes de Vera mezclan
+    // idiomas (p. ej. al pedir una traducción), troceamos por idioma y leemos cada
+    // segmento con su voz, en vez de forzar un solo idioma para todo el texto.
+    const segments = splitByLanguage(cleanText);
+    console.log('[Vera voice]', segments.map((s) => `${s.lang}:${s.text.slice(0, 30)}`));
 
-    // Cloud "Online (Natural)" voices appear late — wait for one for this language
-    // before choosing, or the first utterance falls back to the old robotic engine.
-    const waitStart = Date.now();
-    await waitForNaturalVoice(utterance.lang);
-    const waited = Date.now() - waitStart;
+    // Esta llamada se convierte en la secuencia vigente; invalida las anteriores.
+    const mySeq = ++speechSeqRef.current;
 
-    const voices = window.speechSynthesis.getVoices();
-    const selectedVoice = getVoice(utterance.lang);
-    console.log('[Vera voice]', selectedVoice?.name || 'ninguna', `(lang ${utterance.lang}, esperó ${waited}ms, ${voices.length} voces)`);
-    if (selectedVoice) utterance.voice = selectedVoice;
+    // Las voces "Online (Natural)" de Edge cargan tarde. Espera a que exista una
+    // para cada idioma presente antes de empezar, o la primera utterance cae al
+    // motor robótico. Si otra llamada nos releva mientras esperamos, abortamos.
+    const langs = [...new Set(segments.map((s) => s.lang))];
+    await Promise.all(langs.map((l) => waitForNaturalVoice(l)));
+    if (mySeq !== speechSeqRef.current) return;
 
-    // Las voces "Online (Natural)" de Edge son de nube y no admiten rate/pitch:
-    // al modificarlos, el navegador cae silenciosamente al motor local robótico.
-    // No reintroducir estas propiedades.
-    utterance.volume = 1;
+    // Encadena las utterances: cada segmento arranca en el onend del anterior.
+    const speakSegment = (index: number) => {
+      if (mySeq !== speechSeqRef.current) return; // relevada o cancelada
+      const seg = segments[index];
+      const utterance = new SpeechSynthesisUtterance(seg.text);
+      utterance.lang = seg.lang;
 
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => {
-      setIsSpeaking(false);
-      // Hands-free call mode: after Vera finishes, listen again automatically
-      if (callModeRef.current) {
-        setTimeout(() => startListening(), 500);
-      }
+      const selectedVoice = getVoice(seg.lang);
+      if (selectedVoice) utterance.voice = selectedVoice;
+
+      // Las voces "Online (Natural)" son de nube y no admiten rate/pitch: al
+      // modificarlos, el navegador cae al motor local robótico. No tocarlos.
+      utterance.volume = 1;
+
+      utterance.onend = () => {
+        if (mySeq !== speechSeqRef.current) return; // fue cancelada
+        if (index < segments.length - 1) {
+          speakSegment(index + 1);
+        } else {
+          // Solo al terminar la ÚLTIMA: apaga el indicador y, en modo llamada,
+          // reactiva el micrófono una única vez.
+          setIsSpeaking(false);
+          if (callModeRef.current) {
+            setTimeout(() => startListening(), 500);
+          }
+        }
+      };
+      utterance.onerror = () => {
+        if (mySeq !== speechSeqRef.current) return;
+        setIsSpeaking(false);
+      };
+
+      window.speechSynthesis.speak(utterance);
     };
-    utterance.onerror = () => setIsSpeaking(false);
 
-    window.speechSynthesis.speak(utterance);
+    setIsSpeaking(true); // se enciende al empezar la primera
+    speakSegment(0);
+  };
+
+  // Idioma en el que debe escuchar el micrófono. Prioridad:
+  // 1) fijado manualmente por el usuario; 2) idioma del último mensaje de Vera
+  // (si te acaba de hablar en inglés, lo natural es responder en inglés);
+  // 3) idioma del modo activo como antes.
+  const getListeningLang = (): string => {
+    if (listeningLang) return listeningLang;
+
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'model' && messages[i].text?.trim()) {
+        return detectLanguage(messages[i].text);
+      }
+    }
+
+    if (mode === 'portuguese') return 'pt-PT';
+    if (['general', 'learn', 'quiz', 'plan'].includes(mode)) return 'es-ES';
+    return 'en-US';
+  };
+
+  // Toque corto: cicla en-US → es-ES → pt-PT (fija el idioma manualmente).
+  const cycleListeningLang = () => {
+    const order = ['en-US', 'es-ES', 'pt-PT'];
+    const current = listeningLang ?? getListeningLang();
+    setListeningLang(order[(order.indexOf(current) + 1) % order.length]);
+  };
+
+  const startLangPress = () => {
+    langLongPressRef.current = false;
+    langTimerRef.current = setTimeout(() => {
+      langLongPressRef.current = true;
+      setListeningLang(null); // pulsación larga → vuelve a automático
+    }, 500);
+  };
+  const endLangPress = () => {
+    clearTimeout(langTimerRef.current);
+    if (!langLongPressRef.current) cycleListeningLang();
   };
 
   const startListening = () => {
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    
+
     if (!SpeechRecognition) {
       setError("Voice requires Chrome or Edge browser.");
       return;
@@ -745,13 +867,9 @@ export default function App() {
       const recognition = new SpeechRecognition();
       recognition.continuous = false;
       recognition.interimResults = false;
-      
-      // Language auto-detection based on mode
-      let lang = 'en-US';
-      if (mode === 'portuguese') lang = 'pt-PT';
-      else if (['general', 'learn', 'quiz', 'plan'].includes(mode)) lang = 'es-ES';
-      
-      recognition.lang = lang;
+
+      // El idioma de escucha lo marca la conversación (o el ajuste manual), no el modo.
+      recognition.lang = getListeningLang();
       
       recognition.onstart = () => {
         setIsListening(true);
@@ -1572,7 +1690,7 @@ export default function App() {
               <div className="flex items-center gap-2 mt-2">
                 {(() => {
                   const status = isListening
-                    ? { color: 'bg-emerald-500', pulse: true, label: 'Listening...' }
+                    ? { color: 'bg-emerald-500', pulse: true, label: `Listening ${LANG_FLAG[getListeningLang()]}...` }
                     : isSpeaking
                     ? { color: 'bg-indigo-500', pulse: true, label: 'Speaking' }
                     : isLoading
@@ -2273,6 +2391,24 @@ export default function App() {
                           )}
                         </AnimatePresence>
                       </div>
+
+                      {/* Listening-language selector: toque cicla el idioma, pulsación larga → auto */}
+                      <button
+                        type="button"
+                        title={listeningLang
+                          ? 'Idioma de escucha fijado — toca para cambiar, mantén pulsado para automático'
+                          : 'Idioma de escucha automático — toca para fijarlo'}
+                        onPointerDown={startLangPress}
+                        onPointerUp={endLangPress}
+                        onPointerLeave={() => clearTimeout(langTimerRef.current)}
+                        className={`w-10 h-10 rounded-full flex items-center justify-center transition-all shadow-sm text-lg leading-none select-none bg-white ${
+                          listeningLang
+                            ? 'border-2 border-indigo-500'
+                            : 'border border-zinc-200 hover:bg-zinc-50'
+                        }`}
+                      >
+                        {LANG_FLAG[getListeningLang()]}
+                      </button>
 
                       {/* Microphone Button */}
                       <button
