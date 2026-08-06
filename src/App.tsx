@@ -74,7 +74,7 @@ import {
   getCoverage,
 } from './services/curriculumService';
 import { getMemory, saveMemory, updateMemory, hasMemory } from './services/memoryService';
-import { detectLanguage, parseLanguageTags, stripLanguageTags, getBaseLang } from './services/voiceLang';
+import { detectLanguage, parseLanguageTags, stripLanguageTags, getBaseLang, mergeShortForeignSegments } from './services/voiceLang';
 import { WeeklyStats } from './types';
 import {
   Flashcard,
@@ -781,6 +781,10 @@ export default function App() {
       .map((s) => ({ text: cleanSpeechText(s.text), lang: s.lang }))
       .filter((s) => s.text.length > 0);
 
+    // Funde tramos extranjeros muy cortos rodeados del idioma base en la voz base:
+    // suena más natural que frenar para cambiar de voz por "supply chain".
+    if (baseLang) segments = mergeShortForeignSegments(segments, baseLang);
+
     // Límite total de ~500 chars repartido entre segmentos.
     segments = capSpeechSegments(segments, 500);
     if (segments.length === 0) return;
@@ -797,10 +801,12 @@ export default function App() {
     await Promise.all(langs.map((l) => waitForNaturalVoice(l)));
     if (mySeq !== speechSeqRef.current) return;
 
-    // Encadena las utterances: cada segmento arranca en el onend del anterior.
-    const speakSegment = (index: number) => {
-      if (mySeq !== speechSeqRef.current) return; // relevada o cancelada
-      const seg = segments[index];
+    // Encola TODAS las utterances de golpe: la cola nativa del navegador las
+    // reproduce con hueco mínimo, sin el corte que dejaba esperar al onend de una
+    // para lanzar la siguiente. speechSeqRef invalida las colas canceladas.
+    setIsSpeaking(true);
+    const lastIndex = segments.length - 1;
+    segments.forEach((seg, index) => {
       const utterance = new SpeechSynthesisUtterance(seg.text);
       utterance.lang = seg.lang;
 
@@ -811,29 +817,24 @@ export default function App() {
       // modificarlos, el navegador cae al motor local robótico. No tocarlos.
       utterance.volume = 1;
 
-      utterance.onend = () => {
-        if (mySeq !== speechSeqRef.current) return; // fue cancelada
-        if (index < segments.length - 1) {
-          speakSegment(index + 1);
-        } else {
-          // Solo al terminar la ÚLTIMA: apaga el indicador y, en modo llamada,
-          // reactiva el micrófono una única vez.
+      // Solo la ÚLTIMA apaga el indicador y, en modo llamada, reactiva el micro
+      // una única vez. Las intermedias no tocan estado.
+      if (index === lastIndex) {
+        utterance.onend = () => {
+          if (mySeq !== speechSeqRef.current) return; // cola cancelada
           setIsSpeaking(false);
           if (callModeRef.current) {
             setTimeout(() => startListening(), 500);
           }
-        }
-      };
-      utterance.onerror = () => {
-        if (mySeq !== speechSeqRef.current) return;
-        setIsSpeaking(false);
-      };
+        };
+        utterance.onerror = () => {
+          if (mySeq !== speechSeqRef.current) return;
+          setIsSpeaking(false);
+        };
+      }
 
       window.speechSynthesis.speak(utterance);
-    };
-
-    setIsSpeaking(true); // se enciende al empezar la primera
-    speakSegment(0);
+    });
   };
 
   // Idioma en el que debe escuchar el micrófono. Prioridad:

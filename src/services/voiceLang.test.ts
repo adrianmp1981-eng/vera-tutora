@@ -4,6 +4,7 @@ import {
   splitByLanguage,
   stripLanguageTags,
   getBaseLang,
+  mergeShortForeignSegments,
 } from './voiceLang';
 
 // A tag token: [EN] [/EN] [ES] [/ES] [PT] [/PT]. The voice must NEVER speak one
@@ -83,6 +84,54 @@ describe('parseLanguageTags with an explicit base language', () => {
     expect(segs[0].lang).toBe('es-ES');
     expect(segs[1].lang).toBe('en-US');
     expect(segs[1].text).toContain('Delivered Duty Paid');
+  });
+});
+
+describe('mergeShortForeignSegments', () => {
+  it('folds a short foreign snippet between base segments into the base voice', () => {
+    const segments = [
+      { text: 'Trabajamos toda la', lang: 'es-ES' },
+      { text: 'supply chain', lang: 'en-US' }, // 2 words, surrounded by es-ES
+      { text: 'cada día en la empresa.', lang: 'es-ES' },
+    ];
+    const merged = mergeShortForeignSegments(segments, 'es-ES');
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].lang).toBe('es-ES');
+    expect(merged[0].text).toContain('supply chain');
+  });
+
+  it('folds a short foreign snippet at the end (only base neighbor)', () => {
+    const segments = [
+      { text: 'Esto lo llamamos', lang: 'es-ES' },
+      { text: 'lead time', lang: 'en-US' },
+    ];
+    const merged = mergeShortForeignSegments(segments, 'es-ES');
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].lang).toBe('es-ES');
+    expect(merged[0].text).toContain('lead time');
+  });
+
+  it('keeps a full foreign sentence in its native voice', () => {
+    const segments = [
+      { text: 'Dijo lo siguiente:', lang: 'es-ES' },
+      { text: 'This is a full sentence spoken in English.', lang: 'en-US' }, // >3 words
+      { text: 'Y luego continuó.', lang: 'es-ES' },
+    ];
+    const merged = mergeShortForeignSegments(segments, 'es-ES');
+
+    expect(merged).toHaveLength(3);
+    expect(merged[1].lang).toBe('en-US');
+    expect(merged[1].text).toContain('full sentence');
+  });
+
+  it('leaves a lone foreign segment alone (no base neighbor to merge with)', () => {
+    const segments = [{ text: 'supply chain', lang: 'en-US' }];
+    const merged = mergeShortForeignSegments(segments, 'es-ES');
+
+    expect(merged).toHaveLength(1);
+    expect(merged[0].lang).toBe('en-US');
   });
 });
 

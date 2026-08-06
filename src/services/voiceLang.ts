@@ -186,3 +186,43 @@ export const parseLanguageTags = (text: string, baseLang?: string): LangSegment[
 
   return merged;
 };
+
+const wordCount = (s: string): number => (s.match(/\p{L}+/gu) || []).length;
+
+/**
+ * Absorb short foreign snippets into the base voice so the voice does not brake
+ * for them. A tiny foreign segment (≤3 words) that is surrounded by base-language
+ * segments is re-labeled to `baseLang` (the Spanish voice saying "supply chain"
+ * with an accent sounds more natural than a hard voice switch). A full foreign
+ * sentence keeps its native voice. Pure — same array shape in and out.
+ */
+export const mergeShortForeignSegments = (
+  segments: LangSegment[],
+  baseLang: string
+): LangSegment[] => {
+  // 1) Re-label short foreign segments whose existing neighbors are ALL base.
+  const relabeled: LangSegment[] = segments.map((seg, i) => {
+    if (seg.lang === baseLang) return seg;
+    if (wordCount(seg.text) > 3) return seg;
+
+    const prev = segments[i - 1];
+    const next = segments[i + 1];
+    const prevIsBase = !prev || prev.lang === baseLang;
+    const nextIsBase = !next || next.lang === baseLang;
+    // Needs at least one real neighbor, and every neighbor must be the base
+    // language ("surrounded by base"). A lone foreign segment keeps its voice.
+    if ((prev || next) && prevIsBase && nextIsBase) {
+      return { text: seg.text, lang: baseLang };
+    }
+    return seg;
+  });
+
+  // 2) Merge consecutive same-language segments.
+  const merged: LangSegment[] = [];
+  for (const seg of relabeled) {
+    const last = merged[merged.length - 1];
+    if (last && last.lang === seg.lang) last.text += ' ' + seg.text;
+    else merged.push({ ...seg });
+  }
+  return merged;
+};
