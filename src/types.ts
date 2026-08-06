@@ -1,4 +1,4 @@
-export type Mode = 'general' | 'english' | 'habits' | 'learn' | 'quiz' | 'sports' | 'plan' | 'business' | 'coding' | 'logistics' | 'portuguese' | 'simulation' | 'daily' | 'explain' | 'case' | 'shadow';
+export type Mode = 'general' | 'english' | 'habits' | 'learn' | 'quiz' | 'sports' | 'plan' | 'business' | 'coding' | 'logistics' | 'portuguese' | 'simulation' | 'daily' | 'explain' | 'case' | 'shadow' | 'curriculum' | 'assess';
 
 export interface Simulation {
   id: string;

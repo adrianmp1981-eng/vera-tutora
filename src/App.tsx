@@ -41,7 +41,10 @@ import {
   TrendingUp,
   TrendingDown,
   Minus,
-  BarChart3
+  BarChart3,
+  Target,
+  ChevronDown,
+  GraduationCap
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
@@ -56,8 +59,20 @@ import {
   searchResources,
   generateSimulationContext,
   buildOpeningMessage,
-  OpeningContext
+  OpeningContext,
+  generateCurriculum
 } from './services/geminiService';
+import {
+  Curriculum,
+  getCurriculum,
+  createCurriculum,
+  clearCurriculum,
+  updateCompetency,
+  normalizeStatus,
+  getNextToStudy,
+  getGlobalCoverage,
+  getCoverage,
+} from './services/curriculumService';
 import { getMemory, saveMemory, updateMemory, hasMemory } from './services/memoryService';
 import { WeeklyStats } from './types';
 import {
@@ -335,6 +350,20 @@ const SIMULATIONS: Simulation[] = [
   },
 ];
 
+// Visual metadata for competency status/level badges in the curriculum modal.
+const STATUS_META: Record<string, { label: string; badge: string; bar: string }> = {
+  sin_evaluar: { label: 'Sin evaluar', badge: 'bg-zinc-100 text-zinc-500', bar: 'bg-zinc-300' },
+  no_lo_se:    { label: 'No lo sé',    badge: 'bg-red-100 text-red-600',   bar: 'bg-red-400' },
+  en_progreso: { label: 'En progreso', badge: 'bg-amber-100 text-amber-700', bar: 'bg-amber-400' },
+  dominado:    { label: 'Dominado',    badge: 'bg-emerald-100 text-emerald-700', bar: 'bg-emerald-500' },
+};
+
+const LEVEL_META: Record<string, { label: string; badge: string }> = {
+  basico:     { label: 'Básico',     badge: 'bg-sky-100 text-sky-700' },
+  intermedio: { label: 'Intermedio', badge: 'bg-violet-100 text-violet-700' },
+  avanzado:   { label: 'Avanzado',   badge: 'bg-fuchsia-100 text-fuchsia-700' },
+};
+
 export default function App() {
   // Persistence initialization
   const [messages, setMessages] = useState<Message[]>(() => {
@@ -459,6 +488,14 @@ export default function App() {
   const [planStep, setPlanStep] = useState(0);
   const [planAnswers, setPlanAnswers] = useState<string[]>([]);
   const [showPlanModal, setShowPlanModal] = useState(false);
+
+  // Competency map ("temario") state
+  const [curriculum, setCurriculum] = useState<Curriculum | null>(() => getCurriculum());
+  const [showCurriculumModal, setShowCurriculumModal] = useState(false);
+  const [curriculumStep, setCurriculumStep] = useState(0);
+  const [curriculumAnswers, setCurriculumAnswers] = useState<string[]>([]);
+  const [expandedAreas, setExpandedAreas] = useState<Record<string, boolean>>({});
+  const refreshCurriculum = () => setCurriculum(getCurriculum());
 
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -832,7 +869,7 @@ export default function App() {
     }
 
     if (mode === 'portuguese') return 'pt-PT';
-    if (['general', 'learn', 'quiz', 'plan'].includes(mode)) return 'es-ES';
+    if (['general', 'learn', 'quiz', 'plan', 'curriculum', 'assess'].includes(mode)) return 'es-ES';
     return 'en-US';
   };
 
@@ -975,6 +1012,24 @@ export default function App() {
     }
     out = out.replace(rvRegex, '');
 
+    // [COMPETENCY]id|status|confidence[/COMPETENCY] — update a competency in the map
+    const compRegex = /\[COMPETENCY\]([\s\S]*?)\[\/COMPETENCY\]/g;
+    while ((m = compRegex.exec(text)) !== null) {
+      const [id, status, conf] = m[1].split('|').map(s => s.trim());
+      if (id && status) {
+        const confidence = Math.max(0, Math.min(100, parseInt(conf || '0', 10) || 0));
+        const existing = getCurriculum()?.competencies.find(c => c.id === id);
+        updateCompetency(id, {
+          status: normalizeStatus(status),
+          confidence,
+          lastTouched: new Date().toISOString(),
+          timesStudied: (existing?.timesStudied || 0) + 1,
+        });
+        touched = true;
+      }
+    }
+    out = out.replace(compRegex, '');
+
     // [STARTCALL] — kick off hands-free voice mode (daily Phase 2).
     // Enabling call mode is enough: utterance.onend auto-starts listening after
     // Vera finishes speaking. Only start manually if voice output is off (no onend).
@@ -995,7 +1050,10 @@ export default function App() {
       touched = true;
     }
 
-    if (touched) refreshDaily();
+    if (touched) {
+      refreshDaily();
+      refreshCurriculum();
+    }
     return out.replace(/\n{3,}/g, '\n\n').trim();
   };
 
@@ -1045,6 +1103,36 @@ export default function App() {
       return;
     }
 
+    // /curriculum — if a map exists, open it; otherwise start the generation Q&A
+    if (messageText.trim().toLowerCase().startsWith('/curriculum')) {
+      const existing = getCurriculum();
+      if (existing) {
+        setCurriculum(existing);
+        setShowCurriculumModal(true);
+        setSidebarOpen(false);
+        setInput('');
+        return;
+      }
+      // No map yet: kick off the conversational generation flow
+      if (isWelcomeScreen) setIsWelcomeScreen(false);
+      const userMessage: Message = { id: generateId(), role: 'user', text: messageText, timestamp: Date.now() };
+      const firstQ: Message = {
+        id: generateId(),
+        role: 'model',
+        text: "Vamos a construir tu mapa de competencias 🎯 — el temario de todo lo que necesitas dominar para tu puesto.\n\nPrimero: ¿cuál es el puesto o rol objetivo para el que quieres prepararte? Descríbelo con tus palabras.",
+        timestamp: Date.now(),
+      };
+      setMessages(prev => [...prev, userMessage, firstQ]);
+      speakText(firstQ.text);
+      setMode('curriculum');
+      setCurriculumStep(1);
+      setCurriculumAnswers([]);
+      setSidebarOpen(false);
+      setIsLoading(false);
+      setInput('');
+      return;
+    }
+
     // Did this send come from the microphone? (used for fluency metrics)
     const fromVoice = callMode || voiceInputRef.current;
     voiceInputRef.current = false;
@@ -1084,6 +1172,7 @@ export default function App() {
     else if (messageText.startsWith('/explain')) detectedMode = 'explain';
     else if (messageText.startsWith('/case')) detectedMode = 'case';
     else if (messageText.startsWith('/shadow')) detectedMode = 'shadow';
+    else if (messageText.startsWith('/assess')) detectedMode = 'assess';
     else if (messageText.startsWith('/simulate')) {
       setShowSimulationPicker(true);
       setIsLoading(false);
@@ -1194,6 +1283,52 @@ export default function App() {
           setPlanStep(0);
         } catch (err: any) {
           setError(err.message || "Failed to generate plan.");
+        } finally {
+          setIsLoading(false);
+          setInput('');
+        }
+      }
+      return;
+    }
+
+    // Competency-map generation Q&A: 1) target role, 2) experience/calibration, then generate.
+    if (mode === 'curriculum') {
+      const updatedAnswers = [...curriculumAnswers, messageText];
+      setCurriculumAnswers(updatedAnswers);
+
+      if (curriculumStep < 2) {
+        const veraResponse: Message = {
+          id: generateId(),
+          role: 'model',
+          text: "Genial. Ahora, para calibrar bien el temario a tu nivel: ¿cuántos años llevas en ese ámbito y qué partes ya manejas con soltura?",
+          timestamp: Date.now(),
+        };
+        setMessages(prev => [...prev, veraResponse]);
+        speakText(veraResponse.text);
+        setCurriculumStep(2);
+        setIsLoading(false);
+        setInput('');
+      } else {
+        try {
+          const role = updatedAnswers[0];
+          const context = updatedAnswers[1] || 'Sin contexto adicional.';
+          const competencies = await generateCurriculum(role, context);
+          const created = createCurriculum(role, competencies);
+          setCurriculum(created);
+          const areaCount = new Set(competencies.map(c => c.area)).size;
+          const veraResponse: Message = {
+            id: generateId(),
+            role: 'model',
+            text: `¡Listo! 🎯 He creado tu mapa de competencias para **${role}**: **${areaCount} áreas** y **${competencies.length} competencias** en total.\n\nAhora lo suyo es hacer una autoevaluación rápida para saber de qué partes ya sabes y por dónde empezar. Lo hacemos de 8 en 8 para que no se haga pesado.\n\nEscribe **/assess** cuando quieras empezar, o abre tu mapa con **/curriculum**.`,
+            timestamp: Date.now(),
+          };
+          setMessages(prev => [...prev, veraResponse]);
+          speakText(veraResponse.text);
+          setMode('general');
+          setCurriculumStep(0);
+          setCurriculumAnswers([]);
+        } catch (err: any) {
+          setError(err.message || "No se pudo generar el temario.");
         } finally {
           setIsLoading(false);
           setInput('');
@@ -1819,6 +1954,41 @@ export default function App() {
               )}
             </div>
 
+            {/* Competency map widget */}
+            <button
+              onClick={() => {
+                closeSidebar();
+                if (curriculum) setShowCurriculumModal(true);
+                else handleSend(undefined, '/curriculum');
+              }}
+              className="w-full bg-zinc-900/50 rounded-2xl p-4 border border-zinc-800 text-left hover:border-zinc-700 transition-all"
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <Target size={16} className="text-cyan-400" />
+                <span className="text-[9px] uppercase tracking-widest text-zinc-500 font-bold">Competency map</span>
+              </div>
+              {curriculum ? (
+                <>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-3xl font-black tracking-tighter text-white">{getGlobalCoverage()}%</span>
+                    <span className="text-[11px] text-zinc-400 font-medium">dominado</span>
+                  </div>
+                  {(() => {
+                    const next = getNextToStudy();
+                    return next ? (
+                      <div className="text-[10px] text-zinc-500 mt-0.5 line-clamp-2">
+                        Siguiente: {next.topic}
+                      </div>
+                    ) : (
+                      <div className="text-[10px] text-emerald-400 mt-0.5 font-medium">¡Mapa completo! ✓</div>
+                    );
+                  })()}
+                </>
+              ) : (
+                <div className="text-[11px] text-zinc-400 mt-1 font-medium">Crea tu temario de competencias →</div>
+              )}
+            </button>
+
             {/* Fluency widget */}
             <button
               onClick={() => { closeSidebar(); setShowProgressModal(true); }}
@@ -2354,6 +2524,7 @@ export default function App() {
                                   { id: 'daily', label: 'Daily session', icon: '🔥', cmd: '/daily' },
                                   { id: 'review', label: 'Review flashcards', icon: '🃏', cmd: '/review' },
                                   { id: 'progress', label: 'My progress', icon: '📈', cmd: '/progress' },
+                                  { id: 'curriculum', label: 'My competency map', icon: '🎯', cmd: '/curriculum' },
                                   { id: 'explain', label: 'Explain it back (Feynman)', icon: '🧠', cmd: '/explain' },
                                   { id: 'case', label: 'Real-world case', icon: '📋', cmd: '/case' },
                                   { id: 'shadow', label: 'Shadowing practice', icon: '🎙️', cmd: '/shadow' },
@@ -2488,6 +2659,158 @@ export default function App() {
             </motion.div>
           </div>
         )}
+      </AnimatePresence>
+
+      {/* Competency Map Modal */}
+      <AnimatePresence>
+        {showCurriculumModal && curriculum && (() => {
+          const coverage = getCoverage();
+          const globalCoverage = getGlobalCoverage();
+          const totalUnassessed = curriculum.competencies.filter(c => c.status === 'sin_evaluar').length;
+          const sortedAreas = [...coverage].sort((a, b) => a.coverage - b.coverage);
+          return (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/60 backdrop-blur-sm">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95, y: 20 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95, y: 20 }}
+                className="bg-white w-full max-w-3xl max-h-[92vh] rounded-3xl shadow-2xl overflow-hidden flex flex-col"
+              >
+                {/* Header: role + global coverage + big progress bar */}
+                <div className="p-6 border-b border-zinc-100 bg-cyan-50">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="p-2 bg-cyan-600 text-white rounded-xl shrink-0">
+                        <Target size={20} />
+                      </div>
+                      <div className="min-w-0">
+                        <h3 className="text-xl font-black tracking-tighter text-cyan-900 truncate">Mapa de competencias</h3>
+                        <p className="text-[12px] text-cyan-700/80 font-medium truncate">{curriculum.role}</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setShowCurriculumModal(false)}
+                      className="p-2 hover:bg-cyan-100 text-cyan-500 rounded-full transition-colors shrink-0"
+                    >
+                      <X size={20} />
+                    </button>
+                  </div>
+                  <div className="mt-4">
+                    <div className="flex items-baseline justify-between mb-1.5">
+                      <span className="text-[11px] uppercase tracking-widest font-bold text-cyan-700">Cobertura global</span>
+                      <span className="text-2xl font-black tracking-tighter text-cyan-900">{globalCoverage}%</span>
+                    </div>
+                    <div className="w-full h-3 bg-cyan-100 rounded-full overflow-hidden">
+                      <div className="h-full bg-cyan-500 rounded-full transition-all" style={{ width: `${globalCoverage}%` }} />
+                    </div>
+                    <div className="mt-1.5 text-[11px] text-cyan-700/80 font-medium">
+                      {curriculum.competencies.length} competencias · {coverage.length} áreas · {totalUnassessed} sin evaluar
+                    </div>
+                  </div>
+                  {totalUnassessed > 0 && (
+                    <button
+                      onClick={() => { setShowCurriculumModal(false); handleSend(undefined, '/assess'); }}
+                      className="w-full mt-4 py-2.5 rounded-xl text-[13px] font-bold text-white bg-cyan-600 hover:bg-cyan-500 transition-all flex items-center justify-center gap-2"
+                    >
+                      <GraduationCap size={16} /> Continuar autoevaluación ({totalUnassessed})
+                    </button>
+                  )}
+                </div>
+
+                {/* Areas as collapsible cards, weakest coverage first */}
+                <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3 bg-zinc-50">
+                  {sortedAreas.map((area) => {
+                    const open = !!expandedAreas[area.area];
+                    const comps = curriculum.competencies.filter(c => c.area === area.area);
+                    return (
+                      <div key={area.area} className="bg-white rounded-2xl border border-zinc-200 overflow-hidden">
+                        <button
+                          onClick={() => setExpandedAreas(prev => ({ ...prev, [area.area]: !prev[area.area] }))}
+                          className="w-full p-4 flex items-center gap-3 text-left hover:bg-zinc-50 transition-colors"
+                        >
+                          <div className="shrink-0 w-11 h-11 rounded-xl bg-zinc-100 flex flex-col items-center justify-center">
+                            <span className="text-[13px] font-black tracking-tighter text-zinc-800 leading-none">{area.coverage}%</span>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="font-bold text-sm text-zinc-900 truncate">{area.area}</div>
+                            <div className="text-[11px] text-zinc-500 mt-0.5">
+                              {area.mastered} dominadas · {area.inProgress} en progreso · {area.unassessed} sin evaluar
+                            </div>
+                            <div className="w-full h-1.5 bg-zinc-100 rounded-full overflow-hidden mt-1.5">
+                              <div className="h-full bg-cyan-500 rounded-full" style={{ width: `${area.coverage}%` }} />
+                            </div>
+                          </div>
+                          <ChevronDown size={18} className={`text-zinc-400 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+                        </button>
+
+                        {open && (
+                          <div className="px-4 pb-4 space-y-2.5 border-t border-zinc-100 pt-3">
+                            {comps.map((c) => {
+                              const st = STATUS_META[c.status] || STATUS_META.sin_evaluar;
+                              const lv = LEVEL_META[c.level] || LEVEL_META.intermedio;
+                              return (
+                                <div key={c.id} className="rounded-xl bg-zinc-50 border border-zinc-100 p-3">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="min-w-0">
+                                      <div className="font-semibold text-[13px] text-zinc-900">{c.topic}</div>
+                                      {c.description && (
+                                        <div className="text-[11px] text-zinc-500 mt-0.5">{c.description}</div>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center flex-wrap gap-1.5 mt-2">
+                                    <span className={`text-[9px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full ${lv.badge}`}>{lv.label}</span>
+                                    <span className={`text-[9px] font-bold uppercase tracking-wide px-2 py-0.5 rounded-full ${st.badge}`}>{st.label}</span>
+                                    {c.notes && (
+                                      <span className="text-[10px] text-zinc-400 italic truncate">{c.notes}</span>
+                                    )}
+                                  </div>
+                                  <div className="flex items-center gap-2 mt-2">
+                                    <div className="flex-1 h-1.5 bg-zinc-200 rounded-full overflow-hidden">
+                                      <div className={`h-full rounded-full ${st.bar}`} style={{ width: `${c.confidence}%` }} />
+                                    </div>
+                                    <span className="text-[10px] font-bold text-zinc-400 w-8 text-right">{c.confidence}%</span>
+                                  </div>
+                                  <button
+                                    onClick={() => {
+                                      setShowCurriculumModal(false);
+                                      handleSend(undefined, `/learn ${c.topic} — ${c.description}`);
+                                    }}
+                                    className="w-full mt-2.5 py-1.5 rounded-lg text-[11px] font-bold text-cyan-700 bg-cyan-50 hover:bg-cyan-100 transition-all"
+                                  >
+                                    Estudiar esto
+                                  </button>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Footer: discreet regenerate */}
+                <div className="p-4 border-t border-zinc-100 bg-white flex justify-center">
+                  <button
+                    onClick={() => {
+                      if (window.confirm('¿Regenerar el temario? Se perderá TODO el progreso actual (autoevaluaciones y competencias dominadas).')) {
+                        clearCurriculum();
+                        setCurriculum(null);
+                        setExpandedAreas({});
+                        setShowCurriculumModal(false);
+                        handleSend(undefined, '/curriculum');
+                      }
+                    }}
+                    className="text-[11px] text-zinc-400 hover:text-red-500 font-medium transition-colors flex items-center gap-1.5"
+                  >
+                    <RotateCcw size={12} /> Regenerar temario
+                  </button>
+                </div>
+              </motion.div>
+            </div>
+          );
+        })()}
       </AnimatePresence>
 
       {/* Weekly Report Modal */}

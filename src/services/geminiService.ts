@@ -3,6 +3,14 @@ import { getMemory } from "./memoryService";
 import { getDueCards } from "./flashcardService";
 import { getStreak } from "./dailySessionService";
 import { getTopErrors } from "./errorProfileService";
+import {
+  Competency,
+  buildCompetencies,
+  getNextToStudy,
+  getWeakAreas,
+  getGlobalCoverage,
+  getUnassessed,
+} from "./curriculumService";
 
 const PORTRAIT_CACHE_KEY = "vera_portrait_b64";
 
@@ -409,6 +417,54 @@ Apply the fluency-first correction rules throughout:
 ${ENGLISH_FLUENCY_RULES}`;
 }
 
+// Injects Adri's competency map so Vera teaches following it: the next thing to
+// study, the weakest areas, and overall coverage. Empty string if no map exists yet.
+function buildCompetencyContext(): string {
+  const next = getNextToStudy();
+  if (!next) return '';
+
+  const weak = getWeakAreas(3)
+    .map((a) => `${a.area} (${a.coverage}% dominado, ${a.unassessed} sin evaluar)`)
+    .join('; ');
+  const coverage = getGlobalCoverage();
+
+  return `\n\nCOMPETENCY MAP — Adri has a structured map of what he needs to master for his role. Use it:
+- Overall coverage: ${coverage}% of the map is dominado.
+- Next competency to work on: [${next.id}] "${next.topic}" (${next.area}, level ${next.level}) — ${next.description}
+- Weakest areas right now: ${weak || 'n/a'}
+Rules:
+- When he asks what to study, propose the next competency from the map, not a random topic
+- When you teach something that maps to a competency, emit [COMPETENCY]id|en_progreso|confidence[/COMPETENCY] to update it (confidence 0-100)
+- When he demonstrates real mastery (answers correctly without hints, explains it back well), mark it 'dominado': [COMPETENCY]id|dominado|90[/COMPETENCY]
+- Periodically remind him of his coverage: "llevas el ${coverage}% del mapa, te faltan áreas por tocar"
+- Prioritize the weak areas when suggesting practice`;
+}
+
+// Assessment mode: Vera walks through the unassessed competencies, 8 per session.
+function buildAssessInstruction(): string {
+  const pending = getUnassessed();
+  if (pending.length === 0) {
+    return `\n\nSELF-ASSESSMENT MODE: There are no competencies left to assess — congratulate Adri and tell him his whole map is evaluated. Suggest he starts studying with /learn or reviews his map with /curriculum.`;
+  }
+
+  const batch = pending.slice(0, 8);
+  const list = batch
+    .map((c) => `- [${c.id}] "${c.topic}" (${c.area}, ${c.level}): ${c.description}`)
+    .join('\n');
+  const remaining = pending.length - batch.length;
+
+  return `\n\nSELF-ASSESSMENT MODE — help Adri self-assess where he stands in his competency map. Assess ONLY these ${batch.length} competencies this session (do NOT dump them all at once — go ONE at a time, conversationally):
+${list}
+
+For EACH competency, one at a time:
+1. State the topic and ask directly whether he masters it, offering exactly four options: "no lo conozco" / "me suena" / "lo manejo" / "lo domino".
+2. Translate his answer to status + confidence: no lo conozco → no_lo_se / 0; me suena → no_lo_se / 30; lo manejo → en_progreso / 65; lo domino → dominado / 90.
+3. If he says "lo domino", ask ONE real verification question about it before accepting it. If he fails or is vague, lower it to en_progreso with a lower confidence and note it: keep his real level honest.
+4. Emit the update at the END of your message: [COMPETENCY]id|status|confidence[/COMPETENCY]. When you catch a weak "lo domino", also record what you observed in notes by lowering confidence and mentioning it in your text.
+
+After these ${batch.length}, tell him how many remain (${remaining} sin evaluar) and that he can continue with /assess. Keep it warm and quick — this is a check-in, not an exam.`;
+}
+
 function buildSystemPrompt(messages: Message[], lastMessage: string, mode?: Mode, simulationContext?: Simulation): string {
   const memory = getMemory();
   
@@ -437,6 +493,8 @@ function buildSystemPrompt(messages: Message[], lastMessage: string, mode?: Mode
     base += `\n\n${CASE_MODE}`;
   } else if (mode === 'shadow') {
     base += `\n\n${SHADOW_MODE}`;
+  } else if (mode === 'assess') {
+    base += buildAssessInstruction();
   } else if (mode === 'portuguese') {
     base += "\n\nCONTEXT: The user wants to learn European Portuguese (Portugal). ALWAYS use European Portuguese, never Brazilian. Start by asking their current level (A1/A2/B1/B2/C1/C2) if not known from memory. Then teach according to their level. Use the complete curriculum. Correct their Portuguese writing immediately. Use visual aids (tables, flashcards) for vocabulary. Suggest resources when appropriate.";
   } else if (mode === 'simulation' && simulationContext) {
@@ -474,6 +532,8 @@ RULES FOR THIS SIMULATION:
         .map((e) => `- [${e.type}/${e.language}] ${e.description} (seen ${e.occurrences}x) — e.g. "${e.example}" → "${e.correction}"`)
         .join('\n');
   }
+
+  base += buildCompetencyContext();
 
   if (!memory) return base;
 
@@ -886,6 +946,52 @@ Keep the tone warm, direct, and professional. Use bullet points and bold text fo
   } catch (error) {
     console.error("Study plan generation error:", error);
     throw new Error("No se pudo generar el plan de estudio.");
+  }
+}
+
+export async function generateCurriculum(role: string, context: string): Promise<Competency[]> {
+  const prompt = `Build a complete competency map for someone working as: ${role}.
+Context about their current level: ${context}
+
+Produce a comprehensive, realistic list of everything they need to master to be excellent and current in this role — not a generic list, but what actually matters in the job day to day plus what is emerging in the field.
+
+Group it into 6-10 AREAS. Within each area, list 4-8 specific COMPETENCIES.
+For each competency give: area, topic, description (one sentence on what mastering it means in practice), and level (basico/intermedio/avanzado).
+
+Cover both the fundamentals and what is changing in the field right now: new regulations, technology, tools, and emerging practices.
+Return ONLY a JSON array of objects with keys: area, topic, description, level.`;
+
+  try {
+    const response = await callGemini({
+      model: MODELS.chat,
+      contents: [{ parts: [{ text: prompt }] }],
+      config: {
+        temperature: 0.7,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "ARRAY",
+          items: {
+            type: "OBJECT",
+            properties: {
+              area: { type: "STRING" },
+              topic: { type: "STRING" },
+              description: { type: "STRING" },
+              level: { type: "STRING" },
+            },
+            required: ["area", "topic", "description", "level"],
+          },
+        },
+      },
+    });
+
+    const resultText = response.text;
+    if (!resultText) throw new Error("empty");
+    const raw = JSON.parse(resultText);
+    if (!Array.isArray(raw) || raw.length === 0) throw new Error("bad shape");
+    return buildCompetencies(raw);
+  } catch (error) {
+    console.error("Curriculum generation error:", error);
+    throw new Error("No se pudo generar el temario de competencias.");
   }
 }
 
