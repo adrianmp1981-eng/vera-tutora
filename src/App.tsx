@@ -74,6 +74,7 @@ import {
   getCoverage,
 } from './services/curriculumService';
 import { getMemory, saveMemory, updateMemory, hasMemory } from './services/memoryService';
+import { detectLanguage, splitByLanguage, parseLanguageTags, stripLanguageTags } from './services/voiceLang';
 import { WeeklyStats } from './types';
 import {
   Flashcard,
@@ -126,79 +127,34 @@ const OLD_VOICE_NAMES = ['Zira', 'David', 'Mark', 'Helena', 'Laura', 'Pablo', 'H
 
 const LANG_FLAG: Record<string, string> = { 'en-US': '🇺🇸', 'es-ES': '🇪🇸', 'pt-PT': '🇵🇹' };
 
-// Puntúa un texto en cada idioma: palabras frecuentes (1 punto) + caracteres
-// exclusivos (3 puntos porque son señales muy fuertes).
-const languageScores = (text: string): { 'en-US': number; 'es-ES': number; 'pt-PT': number } => {
-  const lower = text.toLowerCase();
+// Quita markdown y bloques no hablables de un tramo de texto para la voz. NO toca
+// las etiquetas [EN]/[ES]/[PT]: parseLanguageTags ya las ha consumido antes.
+const cleanSpeechText = (text: string): string =>
+  text
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/\*(.*?)\*/g, '$1')
+    .replace(/#{1,6}\s/g, '')
+    .replace(/\[.*?\]\(.*?\)/g, '')
+    .replace(/`.*?`/g, '')
+    .replace(/\[VISUAL_START\][\s\S]*?\[VISUAL_END\]/g, '')
+    .trim();
 
-  const PT_WORDS = ['não', 'você', 'obrigado', 'muito', 'está', 'são', 'também', 'então', 'agora', 'aqui'];
-  const ES_WORDS = ['hola', 'qué', 'cómo', 'para', 'pero', 'porque', 'cuando', 'muy', 'más', 'ahora', 'tienes', 'vamos', 'gracias'];
-  const EN_WORDS = ['the', 'you', 'and', 'that', 'with', 'this', 'have', 'what', 'your', 'from', 'they', 'will'];
-
-  const countWords = (words: string[]): number =>
-    words.reduce((total, word) => {
-      const matches = lower.match(new RegExp(`\\b${word}\\b`, 'g'));
-      return total + (matches ? matches.length : 0);
-    }, 0);
-
-  const countChars = (regex: RegExp): number => {
-    const matches = text.match(regex);
-    return matches ? matches.length : 0;
-  };
-
-  return {
-    'pt-PT': countWords(PT_WORDS) + countChars(/[ãõç]/gi) * 3,
-    'es-ES': countWords(ES_WORDS) + countChars(/[¿¡ñ]/gi) * 3,
-    'en-US': countWords(EN_WORDS),
-  };
-};
-
-// Detecta el idioma del TEXTO (no del modo activo), para que la voz coincida con
-// el idioma real. Así el saludo en español no suena con acento inglés aunque el
-// modo restaurado sea 'english', y se arreglan las mezclas de idioma.
-const detectLanguage = (text: string): 'en-US' | 'es-ES' | 'pt-PT' => {
-  const s = languageScores(text);
-  if (s['pt-PT'] > s['es-ES'] && s['pt-PT'] > s['en-US']) return 'pt-PT';
-  if (s['es-ES'] > s['pt-PT'] && s['es-ES'] > s['en-US']) return 'es-ES';
-  // Empate a cero (o inglés gana) → 'en-US'.
-  return 'en-US';
-};
-
-// Trocea un texto mixto en segmentos etiquetados por idioma, para poder leer cada
-// trozo con su voz. Los mensajes de traducción de Vera mezclan idiomas ("How would
-// you say this: 'Estamos teniendo retrasos.'") y una sola voz los destroza.
-const splitByLanguage = (text: string): Array<{ text: string; lang: string }> => {
-  // Fronteras: saltos de línea, fin de frase (. ! ? :) y comillas de apertura/cierre
-  // (las citas suelen marcar el cambio de idioma). Se descartan los trozos sin letras.
-  const rawSegments = text
-    .split(/\n+|(?<=[.!?:])\s+|(?=["“”«»])|(?<=["“”«»])/g)
-    .map((s) => s.trim())
-    .filter((s) => /\p{L}/u.test(s));
-
-  const wordCount = (s: string): number => (s.match(/\p{L}+/gu) || []).length;
-
-  const merged: Array<{ text: string; lang: string }> = [];
-  for (const seg of rawSegments) {
-    const scores = languageScores(seg);
-    const maxScore = Math.max(scores['en-US'], scores['es-ES'], scores['pt-PT']);
-    let lang: string = detectLanguage(seg);
-
-    // Segmento muy corto y sin señales claras → hereda el idioma del anterior
-    // en vez de arriesgar una detección mala.
-    if (wordCount(seg) < 4 && maxScore === 0 && merged.length > 0) {
-      lang = merged[merged.length - 1].lang;
-    }
-
-    // Fusiona segmentos consecutivos del mismo idioma para no cortar la prosodia.
-    const last = merged[merged.length - 1];
-    if (last && last.lang === lang) {
-      last.text += ' ' + seg;
-    } else {
-      merged.push({ text: seg, lang });
-    }
+// Limita el total de caracteres hablados repartiéndolos entre segmentos, para no
+// pronunciar mensajes larguísimos (el límite de ~500 chars que había antes).
+const capSpeechSegments = (
+  segments: Array<{ text: string; lang: string }>,
+  limit: number
+): Array<{ text: string; lang: string }> => {
+  const out: Array<{ text: string; lang: string }> = [];
+  let used = 0;
+  for (const s of segments) {
+    if (used >= limit) break;
+    const remaining = limit - used;
+    const text = s.text.length > remaining ? s.text.slice(0, remaining) : s.text;
+    out.push({ text, lang: s.lang });
+    used += text.length;
   }
-
-  return merged;
+  return out;
 };
 
 // Cloud "Online (Natural)" voices load asynchronously and can be missing on the
@@ -800,28 +756,31 @@ export default function App() {
     return null;
   };
 
-  const speakText = async (text: string) => {
+  // speakText(text) lee el texto plano (adivina el idioma por heurística).
+  // speakText(text, spoken) usa spoken cuando existe: respeta las etiquetas
+  // [EN]/[ES]/[PT] que Vera emite para pronunciar cada tramo con su voz.
+  const speakText = async (text: string, spoken?: string) => {
     if (!voiceEnabled) return;
     if (!window.speechSynthesis) return;
 
     window.speechSynthesis.cancel();
 
-    // Clean markdown from text
-    const cleanText = text
-      .replace(/\*\*(.*?)\*\*/g, '$1')
-      .replace(/\*(.*?)\*/g, '$1')
-      .replace(/#{1,6}\s/g, '')
-      .replace(/\[.*?\]\(.*?\)/g, '')
-      .replace(/`.*?`/g, '')
-      .replace(/\[VISUAL_START\][\s\S]*?\[VISUAL_END\]/g, '')
-      .substring(0, 500); // limit to 500 chars to avoid very long speech
+    // Con spoken: parsea las etiquetas de idioma y limpia markdown por segmento
+    // (así el strip de enlaces markdown no se come un [ES](...) ya desetiquetado).
+    // Sin spoken: camino actual intacto (heurística sobre el texto ya limpio).
+    let segments: Array<{ text: string; lang: string }>;
+    if (spoken !== undefined) {
+      segments = parseLanguageTags(spoken)
+        .map((s) => ({ text: cleanSpeechText(s.text), lang: s.lang }))
+        .filter((s) => s.text.length > 0);
+    } else {
+      segments = splitByLanguage(cleanSpeechText(text));
+    }
 
-    if (!cleanText.trim()) return;
+    // Límite total de ~500 chars repartido entre segmentos.
+    segments = capSpeechSegments(segments, 500);
+    if (segments.length === 0) return;
 
-    // El idioma sale del TEXTO, no del modo. Y como los mensajes de Vera mezclan
-    // idiomas (p. ej. al pedir una traducción), troceamos por idioma y leemos cada
-    // segmento con su voz, en vez de forzar un solo idioma para todo el texto.
-    const segments = splitByLanguage(cleanText);
     console.log('[Vera voice]', segments.map((s) => `${s.lang}:${s.text.slice(0, 30)}`));
 
     // Esta llamada se convierte en la secuencia vigente; invalida las anteriores.
@@ -1078,11 +1037,9 @@ export default function App() {
       refreshCurriculum();
     }
 
-    // [EN]…[/EN] / [ES]…[/ES] / [PT]…[/PT] mark inline foreign-language snippets so
-    // the voice pronounces each part right. Unwrap them here: keep the inner text
-    // (detectLanguage/splitByLanguage handle pronunciation) and never show the tags.
-    out = out.replace(/\[(EN|ES|PT)\]([\s\S]*?)\[\/\1\]/g, '$2');
-
+    // NOTE: language tags [EN]/[ES]/[PT] are intentionally LEFT IN here so the voice
+    // can use them (parseLanguageTags). The chat display strips them via
+    // stripLanguageTags at the call site; speech reads spokenText, which keeps them.
     return out.replace(/\n{3,}/g, '\n\n').trim();
   };
 
@@ -1257,11 +1214,12 @@ export default function App() {
         const veraResponse: Message = {
           id: generateId(),
           role: 'model',
-          text: response,
+          text: stripLanguageTags(response),
+          spokenText: response,
           timestamp: Date.now(),
         };
         setMessages(prev => [...prev, veraResponse]);
-        speakText(veraResponse.text);
+        speakText(veraResponse.text, veraResponse.spokenText);
       } catch (err: any) {
         setError(err.message || "Failed to get debrief.");
       } finally {
@@ -1509,19 +1467,25 @@ export default function App() {
         responseText = `${weaknessMention}\n\n${responseText}`;
       }
 
+      // responseText keeps Vera's [EN]/[ES]/[PT] tags. The voice uses them
+      // (spokenText); the chat shows the stripped version (text).
+      const spokenText = responseText;
+      const displayText = stripLanguageTags(responseText);
+
       const veraResponse: Message = {
         id: generateId(),
         role: 'model',
-        text: responseText,
+        text: displayText,
+        spokenText,
         visualContent: visualContent,
         timestamp: Date.now(),
       };
       setMessages(prev => [...prev, veraResponse]);
-      speakText(veraResponse.text);
+      speakText(veraResponse.text, veraResponse.spokenText);
 
       // Fluency metrics: record a spoken turn when the message came from the mic
       if (fromVoice) {
-        recordSpokenTurn(countWords(messageText), countWords(responseText));
+        recordSpokenTurn(countWords(messageText), countWords(displayText));
         refreshDaily();
       }
 

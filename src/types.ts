@@ -21,6 +21,7 @@ export interface Message {
   videoUrl?: string;
   audioUrl?: string;
   visualContent?: string;
+  spokenText?: string; // text WITH [EN]/[ES]/[PT] tags for the voice; `text` is the stripped chat version
   type?: 'correction';
   correctionData?: {
     original: string;
