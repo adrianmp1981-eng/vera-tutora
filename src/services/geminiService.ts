@@ -11,6 +11,7 @@ import {
   getGlobalCoverage,
   getUnassessed,
 } from "./curriculumService";
+import { getBaseLang } from "./voiceLang";
 
 const PORTRAIT_CACHE_KEY = "vera_portrait_b64";
 
@@ -470,6 +471,8 @@ After these ${batch.length}, tell him how many remain (${remaining} sin evaluar)
 // can switch to English ('en') for immersion. See buildLanguageDiscipline.
 function buildLanguageDiscipline(mode: Mode | undefined, teachingLang: 'es' | 'en'): string {
   const isLanguageMode = mode === 'english' || mode === 'portuguese';
+  // Same single source of truth used by getListeningLang and speakText.
+  const base = getBaseLang(mode, teachingLang);
 
   let rule: string;
   if (isLanguageMode) {
@@ -477,7 +480,7 @@ function buildLanguageDiscipline(mode: Mode | undefined, teachingLang: 'es' | 'e
     rule = mode === 'portuguese'
       ? "In Portuguese mode: always write in European Portuguese (Portugal), never Brazilian, regardless of any other setting."
       : "In English mode: always write in English, regardless of any other setting.";
-  } else if (teachingLang === 'en') {
+  } else if (base === 'en-US') {
     rule = "In every non-language mode: IMMERSION MODE is ON — Adri wants to learn the professional topic AND practice English at the same time. Write entirely in English, adapted to his level (intermediate). Keep sentences clear. When you use a technical term he may not know, add the Spanish equivalent once in parentheses inside an [ES] tag. Correct his English mistakes as you would in english mode, and emit [ERROR] tags for them. This doubles the value of every lesson.";
   } else {
     rule = "In every non-language mode: write in Spanish. Use English only for the specific term or phrase being taught, always inside its [EN] tag.";

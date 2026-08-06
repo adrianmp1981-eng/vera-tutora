@@ -7,9 +7,25 @@
  * (stripLanguageTags). Untagged text still falls back to heuristic detection.
  */
 
+import { Mode } from '../types';
+
 export type LangSegment = { text: string; lang: string };
 
 const TAG_TO_LANG: Record<string, string> = { EN: 'en-US', ES: 'es-ES', PT: 'pt-PT' };
+
+/**
+ * The deterministic base language Vera writes in, given the mode and the teaching
+ * language switch. Single source of truth shared by buildLanguageDiscipline (the
+ * prompt), getListeningLang (the mic) and speakText (the voice) so they can't drift.
+ *   - english    → en-US
+ *   - portuguese → pt-PT
+ *   - everything else → immersion? en-US : es-ES
+ */
+export const getBaseLang = (mode: Mode | undefined, teachingLang: 'es' | 'en'): 'en-US' | 'es-ES' | 'pt-PT' => {
+  if (mode === 'english') return 'en-US';
+  if (mode === 'portuguese') return 'pt-PT';
+  return teachingLang === 'en' ? 'en-US' : 'es-ES';
+};
 
 // Matches any opening or closing language tag: [EN] [/EN] [ES] [/ES] [PT] [/PT].
 const LANG_TAG_RE = /\[(\/?)(EN|ES|PT)\]/g;
@@ -44,14 +60,19 @@ export const languageScores = (text: string): { 'en-US': number; 'es-ES': number
 };
 
 /**
- * Detect the language of a text so the voice matches the real language, not the
- * active mode. Ties at zero (or English wins) fall to 'en-US'.
+ * Detect the language of a text by heuristic. When no language strictly wins
+ * (e.g. all scores are zero), return `fallback` instead of guessing. `fallback`
+ * defaults to 'en-US' to preserve the previous behavior for existing callers.
  */
-export const detectLanguage = (text: string): 'en-US' | 'es-ES' | 'pt-PT' => {
+export const detectLanguage = (
+  text: string,
+  fallback: 'en-US' | 'es-ES' | 'pt-PT' = 'en-US'
+): 'en-US' | 'es-ES' | 'pt-PT' => {
   const s = languageScores(text);
   if (s['pt-PT'] > s['es-ES'] && s['pt-PT'] > s['en-US']) return 'pt-PT';
   if (s['es-ES'] > s['pt-PT'] && s['es-ES'] > s['en-US']) return 'es-ES';
-  return 'en-US';
+  if (s['en-US'] > s['es-ES'] && s['en-US'] > s['pt-PT']) return 'en-US';
+  return fallback;
 };
 
 /**
@@ -103,11 +124,13 @@ export const stripLanguageTags = (text: string): string =>
 /**
  * Turn tagged text into language segments the voice can speak.
  * - [EN]…[/EN] → en-US, [ES]…[/ES] → es-ES, [PT]…[/PT] → pt-PT.
- * - Text OUTSIDE any tag is resolved with splitByLanguage/detectLanguage (fallback).
+ * - Text OUTSIDE any tag: assigned to `baseLang` when given (deterministic, NO
+ *   heuristic — this is the fix for Spanish being read as English); only when
+ *   `baseLang` is absent does it fall back to splitByLanguage/detectLanguage.
  * - Consecutive same-language segments are merged.
  * - Tolerant of unclosed and nested tags: never throws, never leaks a tag token.
  */
-export const parseLanguageTags = (text: string): LangSegment[] => {
+export const parseLanguageTags = (text: string, baseLang?: string): LangSegment[] => {
   // 1) Walk the tokens, assigning each text chunk to the innermost open language
   //    (a stack), or null when no tag is open.
   const chunks: Array<{ text: string; lang: string | null }> = [];
@@ -137,13 +160,17 @@ export const parseLanguageTags = (text: string): LangSegment[] => {
   }
   pushChunk(text.slice(lastIndex));
 
-  // 2) Expand: tagged chunks keep their language; untagged chunks go through the
-  //    heuristic fallback. Drop chunks with no letters.
+  // 2) Expand: tagged chunks keep their language; untagged chunks are assigned to
+  //    baseLang when given, else resolved by the heuristic fallback. Drop chunks
+  //    with no letters.
   const expanded: LangSegment[] = [];
   for (const chunk of chunks) {
     if (chunk.lang) {
       const t = chunk.text.trim();
       if (/\p{L}/u.test(t)) expanded.push({ text: t, lang: chunk.lang });
+    } else if (baseLang) {
+      const t = chunk.text.trim();
+      if (/\p{L}/u.test(t)) expanded.push({ text: t, lang: baseLang });
     } else {
       for (const sub of splitByLanguage(chunk.text)) expanded.push(sub);
     }

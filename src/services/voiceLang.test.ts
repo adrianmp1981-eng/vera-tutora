@@ -3,6 +3,7 @@ import {
   parseLanguageTags,
   splitByLanguage,
   stripLanguageTags,
+  getBaseLang,
 } from './voiceLang';
 
 // A tag token: [EN] [/EN] [ES] [/ES] [PT] [/PT]. The voice must NEVER speak one
@@ -60,6 +61,42 @@ describe('parseLanguageTags', () => {
     expect(segs[0].lang).toBe('en-US');
     expect(segs[0].text).toContain('First part.');
     expect(segs[0].text).toContain('Second part.');
+  });
+});
+
+describe('parseLanguageTags with an explicit base language', () => {
+  // This reproduces today's bug: Spanish text with NO words from ES_WORDS and no
+  // tags used to fall to detectLanguage → 'en-US' and was read with an English voice.
+  it('assigns ALL untagged text to baseLang (no heuristic)', () => {
+    const input = 'Soy Vera, tu tutora personal. En el mundo de la logística internacional todo fluye.';
+    const segs = parseLanguageTags(input, 'es-ES');
+
+    expect(segs.length).toBeGreaterThan(0);
+    for (const s of segs) expect(s.lang).toBe('es-ES');
+  });
+
+  it('keeps a [EN] snippet in English while the base stays Spanish', () => {
+    const input = 'Trabajamos la logística internacional cada día. [EN]Delivered Duty Paid[/EN]';
+    const segs = parseLanguageTags(input, 'es-ES');
+
+    expect(segs).toHaveLength(2);
+    expect(segs[0].lang).toBe('es-ES');
+    expect(segs[1].lang).toBe('en-US');
+    expect(segs[1].text).toContain('Delivered Duty Paid');
+  });
+});
+
+describe('getBaseLang', () => {
+  it('is deterministic per mode/teachingLang', () => {
+    expect(getBaseLang('english', 'es')).toBe('en-US');
+    expect(getBaseLang('english', 'en')).toBe('en-US');
+    expect(getBaseLang('portuguese', 'es')).toBe('pt-PT');
+    expect(getBaseLang('portuguese', 'en')).toBe('pt-PT');
+    // Professional modes follow the teaching-language switch.
+    expect(getBaseLang('logistics', 'es')).toBe('es-ES');
+    expect(getBaseLang('logistics', 'en')).toBe('en-US');
+    expect(getBaseLang('general', 'es')).toBe('es-ES');
+    expect(getBaseLang('coding', 'en')).toBe('en-US');
   });
 });
 

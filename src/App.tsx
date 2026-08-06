@@ -74,7 +74,7 @@ import {
   getCoverage,
 } from './services/curriculumService';
 import { getMemory, saveMemory, updateMemory, hasMemory } from './services/memoryService';
-import { detectLanguage, splitByLanguage, parseLanguageTags, stripLanguageTags } from './services/voiceLang';
+import { detectLanguage, parseLanguageTags, stripLanguageTags, getBaseLang } from './services/voiceLang';
 import { WeeklyStats } from './types';
 import {
   Flashcard,
@@ -127,8 +127,15 @@ const OLD_VOICE_NAMES = ['Zira', 'David', 'Mark', 'Helena', 'Laura', 'Pablo', 'H
 
 const LANG_FLAG: Record<string, string> = { 'en-US': '🇺🇸', 'es-ES': '🇪🇸', 'pt-PT': '🇵🇹' };
 
-// Quita markdown y bloques no hablables de un tramo de texto para la voz. NO toca
-// las etiquetas [EN]/[ES]/[PT]: parseLanguageTags ya las ha consumido antes.
+// Quita bloques NO hablables que pueden abarcar varias frases. Se aplica al texto
+// COMPLETO antes de trocear por idioma (un [VISUAL_START]...[VISUAL_END] no debe
+// partirse). No toca markdown inline ni las etiquetas [EN]/[ES]/[PT].
+const stripNonSpoken = (text: string): string =>
+  text.replace(/\[VISUAL_START\][\s\S]*?\[VISUAL_END\]/g, '');
+
+// Limpia markdown inline de un tramo YA troceado. Se aplica DESPUÉS de
+// parseLanguageTags, así el strip de enlaces markdown ([..](..)) no se come un
+// [ES](...) que aún tuviera forma de enlace.
 const cleanSpeechText = (text: string): string =>
   text
     .replace(/\*\*(.*?)\*\*/g, '$1')
@@ -136,7 +143,6 @@ const cleanSpeechText = (text: string): string =>
     .replace(/#{1,6}\s/g, '')
     .replace(/\[.*?\]\(.*?\)/g, '')
     .replace(/`.*?`/g, '')
-    .replace(/\[VISUAL_START\][\s\S]*?\[VISUAL_END\]/g, '')
     .trim();
 
 // Limita el total de caracteres hablados repartiéndolos entre segmentos, para no
@@ -642,7 +648,9 @@ export default function App() {
       const text = await buildOpeningMessage(ctx);
       const msg: Message = { id: generateId(), role: 'model', text, timestamp: Date.now() };
       setMessages([msg]);
-      speakText(text);
+      // El saludo lo escribe buildOpeningMessage en el idioma de preferencia (por
+      // defecto español). No lleva etiquetas, así que le pasamos su idioma base.
+      speakText(text, undefined, getMemory()?.preferences?.language === 'english' ? 'en-US' : 'es-ES');
     } catch (err) {
       const msg: Message = {
         id: generateId(),
@@ -756,26 +764,22 @@ export default function App() {
     return null;
   };
 
-  // speakText(text) lee el texto plano (adivina el idioma por heurística).
-  // speakText(text, spoken) usa spoken cuando existe: respeta las etiquetas
-  // [EN]/[ES]/[PT] que Vera emite para pronunciar cada tramo con su voz.
-  const speakText = async (text: string, spoken?: string) => {
+  // speakText(text, spoken?, baseLang?):
+  // - spoken (si existe) es el texto CON etiquetas [EN]/[ES]/[PT]; si no, se usa text.
+  // - baseLang fija el idioma del texto FUERA de etiquetas de forma determinista
+  //   (nunca se adivina). Sin baseLang se cae a la heurística (compatibilidad).
+  const speakText = async (text: string, spoken?: string, baseLang?: string) => {
     if (!voiceEnabled) return;
     if (!window.speechSynthesis) return;
 
     window.speechSynthesis.cancel();
 
-    // Con spoken: parsea las etiquetas de idioma y limpia markdown por segmento
-    // (así el strip de enlaces markdown no se come un [ES](...) ya desetiquetado).
-    // Sin spoken: camino actual intacto (heurística sobre el texto ya limpio).
-    let segments: Array<{ text: string; lang: string }>;
-    if (spoken !== undefined) {
-      segments = parseLanguageTags(spoken)
-        .map((s) => ({ text: cleanSpeechText(s.text), lang: s.lang }))
-        .filter((s) => s.text.length > 0);
-    } else {
-      segments = splitByLanguage(cleanSpeechText(text));
-    }
+    // Quita bloques no hablables del texto completo, trocea por idioma respetando
+    // las etiquetas (base = baseLang), y limpia markdown inline por segmento.
+    const source = stripNonSpoken(spoken ?? text);
+    let segments = parseLanguageTags(source, baseLang)
+      .map((s) => ({ text: cleanSpeechText(s.text), lang: s.lang }))
+      .filter((s) => s.text.length > 0);
 
     // Límite total de ~500 chars repartido entre segmentos.
     segments = capSpeechSegments(segments, 500);
@@ -840,19 +844,17 @@ export default function App() {
   const getListeningLang = (): string => {
     if (listeningLang) return listeningLang;
 
+    // Base determinista del modo/idioma de enseñanza; también sirve de reserva
+    // para la detección del último mensaje (si puntúa cero, no adivina inglés).
+    const base = getBaseLang(mode, teachingLang);
+
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === 'model' && messages[i].text?.trim()) {
-        return detectLanguage(messages[i].text);
+        return detectLanguage(messages[i].text, base);
       }
     }
 
-    if (mode === 'portuguese') return 'pt-PT';
-    // Módulos profesionales: en inmersión el micrófono espera inglés automáticamente.
-    if (['general', 'learn', 'quiz', 'habits', 'logistics', 'business', 'sports', 'coding'].includes(mode)) {
-      return teachingLang === 'en' ? 'en-US' : 'es-ES';
-    }
-    if (['plan', 'curriculum', 'assess'].includes(mode)) return 'es-ES';
-    return 'en-US';
+    return base;
   };
 
   // Toque corto: cicla en-US → es-ES → pt-PT (fija el idioma manualmente).
@@ -1109,7 +1111,7 @@ export default function App() {
         timestamp: Date.now(),
       };
       setMessages(prev => [...prev, userMessage, firstQ]);
-      speakText(firstQ.text);
+      speakText(firstQ.text, undefined, 'es-ES');
       setMode('curriculum');
       setCurriculumStep(1);
       setCurriculumAnswers([]);
@@ -1198,7 +1200,7 @@ export default function App() {
         timestamp: Date.now(),
       };
       setMessages(prev => [...prev, veraResponse]);
-      speakText(veraResponse.text);
+      speakText(veraResponse.text, undefined, 'en-US');
       setIsLoading(false);
       setInput('');
       return;
@@ -1219,7 +1221,7 @@ export default function App() {
           timestamp: Date.now(),
         };
         setMessages(prev => [...prev, veraResponse]);
-        speakText(veraResponse.text, veraResponse.spokenText);
+        speakText(veraResponse.text, veraResponse.spokenText, getBaseLang(mode, teachingLang));
       } catch (err: any) {
         setError(err.message || "Failed to get debrief.");
       } finally {
@@ -1249,7 +1251,7 @@ export default function App() {
           timestamp: Date.now(),
         };
         setMessages(prev => [...prev, veraResponse]);
-        speakText(veraResponse.text);
+        speakText(veraResponse.text, undefined, 'en-US'); // preguntas canned en inglés
         setPlanStep(planStep + 1);
         setIsLoading(false);
         setInput('');
@@ -1265,6 +1267,7 @@ export default function App() {
             timestamp: Date.now(),
           };
           setMessages(prev => [...prev, veraResponse]);
+          // El plan lo genera el modelo en idioma libre (texto largo): heurística.
           speakText(veraResponse.text);
           setMode('general');
           setPlanStep(0);
@@ -1291,7 +1294,7 @@ export default function App() {
           timestamp: Date.now(),
         };
         setMessages(prev => [...prev, veraResponse]);
-        speakText(veraResponse.text);
+        speakText(veraResponse.text, undefined, 'es-ES');
         setCurriculumStep(2);
         setIsLoading(false);
         setInput('');
@@ -1310,7 +1313,7 @@ export default function App() {
             timestamp: Date.now(),
           };
           setMessages(prev => [...prev, veraResponse]);
-          speakText(veraResponse.text);
+          speakText(veraResponse.text, undefined, 'es-ES');
           setMode('general');
           setCurriculumStep(0);
           setCurriculumAnswers([]);
@@ -1374,7 +1377,7 @@ export default function App() {
 
     if (correctionMsg) {
       setMessages(prev => [...prev, correctionMsg!]);
-      speakText(correctionMsg.text);
+      speakText(correctionMsg.text, undefined, 'en-US'); // explicación del coach de inglés
     }
 
     const finalHistory = correctionMsg ? [...newMessages, correctionMsg] : newMessages;
@@ -1410,7 +1413,7 @@ export default function App() {
           timestamp: Date.now(),
         };
         setMessages(prev => [...prev, veraResponse]);
-        speakText(veraResponse.text);
+        speakText(veraResponse.text, undefined, 'en-US'); // confirmación canned en inglés
       } catch (err: any) {
         setError(err.message || "Failed to generate report.");
       } finally {
@@ -1481,7 +1484,8 @@ export default function App() {
         timestamp: Date.now(),
       };
       setMessages(prev => [...prev, veraResponse]);
-      speakText(veraResponse.text, veraResponse.spokenText);
+      // Idioma base determinista del modo + inmersión (nunca se adivina el base).
+      speakText(veraResponse.text, veraResponse.spokenText, getBaseLang(detectedMode, teachingLang));
 
       // Fluency metrics: record a spoken turn when the message came from the mic
       if (fromVoice) {
@@ -1529,7 +1533,9 @@ export default function App() {
         timestamp: Date.now(),
       };
       setMessages(prev => [...prev, veraResponse]);
-      speakText(veraResponse.text);
+      const simLang = simulation.language === 'english' ? 'en-US'
+        : simulation.language === 'portuguese' ? 'pt-PT' : 'es-ES';
+      speakText(veraResponse.text, undefined, simLang);
     } catch (err: any) {
       setError("Failed to start simulation.");
     } finally {
@@ -1559,7 +1565,8 @@ export default function App() {
       timestamp: Date.now(),
     };
     setMessages([initialMsg]);
-    speakText(initialMsg.text);
+    // Saludos canned: todos en inglés salvo el de portugués.
+    speakText(initialMsg.text, undefined, selectedMode === 'portuguese' ? 'pt-PT' : 'en-US');
     setIsWelcomeScreen(false);
   };
 
@@ -2191,8 +2198,8 @@ export default function App() {
               </button>
             ))}
             
-            <div className="relative ml-1" ref={headerDropdownRef}>
-              <button 
+            <div className="relative ml-1 flex items-center" ref={headerDropdownRef}>
+              <button
                 onClick={() => setIsHeaderDropdownOpen(!isHeaderDropdownOpen)}
                 className={`w-10 h-10 flex items-center justify-center rounded-full transition-all ${isHeaderDropdownOpen ? 'bg-zinc-200 text-zinc-900' : 'text-zinc-400 hover:text-zinc-600 hover:bg-zinc-100'}`}
               >
