@@ -109,6 +109,38 @@ const PREFERRED_VOICES: Record<string, string[]> = {
 // Old robotic Windows/legacy voices to avoid as a last resort.
 const OLD_VOICE_NAMES = ['Zira', 'David', 'Mark', 'Helena', 'Laura', 'Pablo', 'Helia', 'Hazel', 'George', 'Sabina', 'Raul'];
 
+// Detecta el idioma del TEXTO que se va a pronunciar (no del modo activo), para
+// que la voz coincida con el idioma real. Así el saludo en español no suena con
+// acento inglés aunque el modo restaurado sea 'english', y se arreglan las mezclas.
+const detectLanguage = (text: string): 'en-US' | 'es-ES' | 'pt-PT' => {
+  const lower = text.toLowerCase();
+
+  const PT_WORDS = ['não', 'você', 'obrigado', 'muito', 'está', 'são', 'também', 'então', 'agora', 'aqui'];
+  const ES_WORDS = ['hola', 'qué', 'cómo', 'para', 'pero', 'porque', 'cuando', 'muy', 'más', 'ahora', 'tienes', 'vamos', 'gracias'];
+  const EN_WORDS = ['the', 'you', 'and', 'that', 'with', 'this', 'have', 'what', 'your', 'from', 'they', 'will'];
+
+  const countWords = (words: string[]): number =>
+    words.reduce((total, word) => {
+      const matches = lower.match(new RegExp(`\\b${word}\\b`, 'g'));
+      return total + (matches ? matches.length : 0);
+    }, 0);
+
+  const countChars = (regex: RegExp): number => {
+    const matches = text.match(regex);
+    return matches ? matches.length : 0;
+  };
+
+  // Caracteres exclusivos: señales muy fuertes, valen 3 puntos cada aparición.
+  const ptScore = countWords(PT_WORDS) + countChars(/[ãõç]/gi) * 3;
+  const esScore = countWords(ES_WORDS) + countChars(/[¿¡ñ]/gi) * 3;
+  const enScore = countWords(EN_WORDS);
+
+  if (ptScore > esScore && ptScore > enScore) return 'pt-PT';
+  if (esScore > ptScore && esScore > enScore) return 'es-ES';
+  // Empate a cero (o inglés gana) → 'en-US'.
+  return 'en-US';
+};
+
 // Cloud "Online (Natural)" voices load asynchronously and can be missing on the
 // very first utterance. Poll (and listen to onvoiceschanged) until one exists for
 // this language, or give up after maxWaitMs so we never block indefinitely.
@@ -668,14 +700,9 @@ export default function App() {
 
     const utterance = new SpeechSynthesisUtterance(cleanText);
 
-    // Set language based on current mode
-    if (mode === 'portuguese') {
-      utterance.lang = 'pt-PT';
-    } else if (['english', 'sports', 'business', 'coding', 'logistics'].includes(mode)) {
-      utterance.lang = 'en-US';
-    } else {
-      utterance.lang = 'es-ES';
-    }
+    // El idioma sale del TEXTO ya limpio, no del modo: así la voz coincide con
+    // el idioma real de la respuesta (arregla el saludo y las mezclas de idioma).
+    utterance.lang = detectLanguage(cleanText);
 
     // Cloud "Online (Natural)" voices appear late — wait for one for this language
     // before choosing, or the first utterance falls back to the old robotic engine.
@@ -685,7 +712,7 @@ export default function App() {
 
     const voices = window.speechSynthesis.getVoices();
     const selectedVoice = getVoice(utterance.lang);
-    console.log('[Vera voice]', selectedVoice?.name || 'ninguna', `(esperó ${waited}ms, ${voices.length} voces)`);
+    console.log('[Vera voice]', selectedVoice?.name || 'ninguna', `(lang ${utterance.lang}, esperó ${waited}ms, ${voices.length} voces)`);
     if (selectedVoice) utterance.voice = selectedVoice;
 
     // Las voces "Online (Natural)" de Edge son de nube y no admiten rate/pitch:
