@@ -465,7 +465,31 @@ For EACH competency, one at a time:
 After these ${batch.length}, tell him how many remain (${remaining} sin evaluar) and that he can continue with /assess. Keep it warm and quick — this is a check-in, not an exam.`;
 }
 
-function buildSystemPrompt(messages: Message[], lastMessage: string, mode?: Mode, simulationContext?: Simulation): string {
+// Which language Vera writes her lessons in. Language modes (english/portuguese)
+// are always in the target language; professional modes default to Spanish but
+// can switch to English ('en') for immersion. See buildLanguageDiscipline.
+function buildLanguageDiscipline(mode: Mode | undefined, teachingLang: 'es' | 'en'): string {
+  const isLanguageMode = mode === 'english' || mode === 'portuguese';
+
+  let rule: string;
+  if (isLanguageMode) {
+    // Fixed rule for language modes — the switch does not apply here.
+    rule = mode === 'portuguese'
+      ? "In Portuguese mode: always write in European Portuguese (Portugal), never Brazilian, regardless of any other setting."
+      : "In English mode: always write in English, regardless of any other setting.";
+  } else if (teachingLang === 'en') {
+    rule = "In every non-language mode: IMMERSION MODE is ON — Adri wants to learn the professional topic AND practice English at the same time. Write entirely in English, adapted to his level (intermediate). Keep sentences clear. When you use a technical term he may not know, add the Spanish equivalent once in parentheses inside an [ES] tag. Correct his English mistakes as you would in english mode, and emit [ERROR] tags for them. This doubles the value of every lesson.";
+  } else {
+    rule = "In every non-language mode: write in Spanish. Use English only for the specific term or phrase being taught, always inside its [EN] tag.";
+  }
+
+  return `\n\nLANGUAGE DISCIPLINE (this overrides any earlier instruction about matching the user's language):
+${rule}
+
+LANGUAGE TAGGING: Whenever a word or phrase is in a language different from the one you are writing in, wrap it so it is pronounced correctly: [EN]...[/EN] for English, [ES]...[/ES] for Spanish, [PT]...[/PT] for Portuguese. Never mention these tags to Adri — they are processed automatically.`;
+}
+
+function buildSystemPrompt(messages: Message[], lastMessage: string, mode?: Mode, simulationContext?: Simulation, teachingLang: 'es' | 'en' = 'es'): string {
   const memory = getMemory();
   
   // Choose between short and full instructions based on context
@@ -534,6 +558,8 @@ RULES FOR THIS SIMULATION:
   }
 
   base += buildCompetencyContext();
+
+  base += buildLanguageDiscipline(mode, teachingLang);
 
   if (!memory) return base;
 
@@ -612,7 +638,7 @@ async function callGemini(payload: GeminiRequest): Promise<any> {
   return data || {};
 }
 
-export async function sendMessageToVera(messages: Message[], currentMode: Mode, simulationContext?: Simulation): Promise<string> {
+export async function sendMessageToVera(messages: Message[], currentMode: Mode, simulationContext?: Simulation, teachingLang: 'es' | 'en' = 'es'): Promise<string> {
   const lastMessage = messages[messages.length - 1]?.text || "";
   
   // Optimization: Reduce history sent to API (last 10 messages, max 500 chars each)
@@ -643,7 +669,7 @@ export async function sendMessageToVera(messages: Message[], currentMode: Mode, 
       model: MODELS.chat,
       contents: [...history, { role: "user", parts: [{ text: visualPrompt }] }],
       config: {
-        systemInstruction: buildSystemPrompt(messages, lastMessage, currentMode, simulationContext),
+        systemInstruction: buildSystemPrompt(messages, lastMessage, currentMode, simulationContext, teachingLang),
         temperature: 0.5
       },
     });

@@ -350,6 +350,15 @@ const SIMULATIONS: Simulation[] = [
   },
 ];
 
+// Accent color per mode, used for the active side of the teaching-language toggle.
+const MODE_COLORS: Record<string, string> = {
+  general: '#6366f1', learn: '#6366f1', quiz: '#6366f1', plan: '#6366f1',
+  habits: '#f59e0b', sports: '#f97316', business: '#8b5cf6', coding: '#14b8a6',
+  logistics: '#ef4444', daily: '#6366f1', explain: '#0ea5e9', case: '#d946ef',
+  shadow: '#ec4899', curriculum: '#06b6d4', assess: '#06b6d4',
+};
+const getModeColor = (mode: string): string => MODE_COLORS[mode] || '#6366f1';
+
 // Visual metadata for competency status/level badges in the curriculum modal.
 const STATUS_META: Record<string, { label: string; badge: string; bar: string }> = {
   sin_evaluar: { label: 'Sin evaluar', badge: 'bg-zinc-100 text-zinc-500', bar: 'bg-zinc-300' },
@@ -397,6 +406,11 @@ export default function App() {
   });
   const [isMuted, setIsMuted] = useState(() => {
     return localStorage.getItem(STORAGE_KEYS.MUTE) === 'true';
+  });
+  // Teaching language for professional modes: 'es' by default, 'en' for immersion.
+  // Language modes (english/portuguese) ignore this — they use their fixed rule.
+  const [teachingLang, setTeachingLang] = useState<'es' | 'en'>(() => {
+    return localStorage.getItem('vera_teaching_lang') === 'en' ? 'en' : 'es';
   });
 
   const [weeklyStats, setWeeklyStats] = useState<WeeklyStats>(() => {
@@ -557,6 +571,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.MUTE, String(isMuted));
   }, [isMuted]);
+
+  useEffect(() => {
+    localStorage.setItem('vera_teaching_lang', teachingLang);
+  }, [teachingLang]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.WEEKLY_STATS, JSON.stringify(weeklyStats));
@@ -858,7 +876,8 @@ export default function App() {
   // Idioma en el que debe escuchar el micrófono. Prioridad:
   // 1) fijado manualmente por el usuario; 2) idioma del último mensaje de Vera
   // (si te acaba de hablar en inglés, lo natural es responder en inglés);
-  // 3) idioma del modo activo como antes.
+  // 3) en módulos profesionales, el idioma de enseñanza (inmersión → inglés);
+  // 4) idioma del modo activo como antes.
   const getListeningLang = (): string => {
     if (listeningLang) return listeningLang;
 
@@ -869,7 +888,11 @@ export default function App() {
     }
 
     if (mode === 'portuguese') return 'pt-PT';
-    if (['general', 'learn', 'quiz', 'plan', 'curriculum', 'assess'].includes(mode)) return 'es-ES';
+    // Módulos profesionales: en inmersión el micrófono espera inglés automáticamente.
+    if (['general', 'learn', 'quiz', 'habits', 'logistics', 'business', 'sports', 'coding'].includes(mode)) {
+      return teachingLang === 'en' ? 'en-US' : 'es-ES';
+    }
+    if (['plan', 'curriculum', 'assess'].includes(mode)) return 'es-ES';
     return 'en-US';
   };
 
@@ -1054,6 +1077,12 @@ export default function App() {
       refreshDaily();
       refreshCurriculum();
     }
+
+    // [EN]…[/EN] / [ES]…[/ES] / [PT]…[/PT] mark inline foreign-language snippets so
+    // the voice pronounces each part right. Unwrap them here: keep the inner text
+    // (detectLanguage/splitByLanguage handle pronunciation) and never show the tags.
+    out = out.replace(/\[(EN|ES|PT)\]([\s\S]*?)\[\/\1\]/g, '$2');
+
     return out.replace(/\n{3,}/g, '\n\n').trim();
   };
 
@@ -1459,7 +1488,7 @@ export default function App() {
     }
 
     try {
-      let responseText = await sendMessageToVera(finalHistory, detectedMode, activeSimulation || undefined);
+      let responseText = await sendMessageToVera(finalHistory, detectedMode, activeSimulation || undefined, teachingLang);
 
       // Parse & run Vera's control tags (flashcards, review grades, call mode, session end)
       responseText = extractControlTags(responseText);
@@ -2213,6 +2242,29 @@ export default function App() {
               >
                 {voiceEnabled ? <Volume2 size={20} /> : <VolumeX size={20} />}
               </button>
+
+              {/* Teaching-language toggle: only in professional modes (not english/portuguese) */}
+              {mode !== 'english' && mode !== 'portuguese' && (
+                <div
+                  className="inline-flex items-center rounded-full bg-zinc-100 p-0.5 ml-1 align-middle select-none"
+                  title="Idioma de las clases"
+                >
+                  {(['es', 'en'] as const).map((lng) => {
+                    const active = teachingLang === lng;
+                    return (
+                      <button
+                        key={lng}
+                        type="button"
+                        onClick={() => setTeachingLang(lng)}
+                        className={`px-2 py-1 rounded-full text-[10px] font-black tracking-wide transition-all ${active ? 'text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-600'}`}
+                        style={active ? { backgroundColor: getModeColor(mode) } : undefined}
+                      >
+                        {lng.toUpperCase()}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
 
               <AnimatePresence>
                 {isHeaderDropdownOpen && (
