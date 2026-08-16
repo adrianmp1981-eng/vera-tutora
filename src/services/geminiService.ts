@@ -26,6 +26,42 @@ const MODELS = {
 // del proxy sin dejar al usuario colgado indefinidamente.
 const CHAT_TIMEOUT_MS = 45000;
 
+// Reintento ante saturación de Google. Solo 503 (modelo saturado) y 429 (rate
+// limit): un 400/401 es un fallo nuestro y no se reintenta.
+const MAX_RETRIES = 3;
+const RETRYABLE_STATUS = new Set([429, 503]);
+
+/**
+ * Espera antes del reintento N: 1s, 2s, 4s para N = 1, 2, 3. Función pura y sin
+ * estado (por eso es testeable de forma aislada) — ver geminiService.test.ts.
+ */
+export function backoffMs(attempt: number): number {
+  return 1000 * Math.pow(2, attempt - 1);
+}
+
+/**
+ * setTimeout como promesa que RESPETA una AbortSignal: si la señal se aborta
+ * durante la espera (p. ej. al vencer CHAT_TIMEOUT_MS), rechaza con AbortError
+ * en vez de seguir durmiendo, para no reintentar fuera de plazo.
+ */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('Aborted', 'AbortError'));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 const SYSTEM_INSTRUCTION_SHORT = `You are Vera, an elite personal tutor. You speak in natural California American English. You are warm, direct, and highly knowledgeable.
 
 YOUR CORE RULES:
@@ -611,42 +647,57 @@ export interface GeminiRequest {
  */
 async function callGemini(payload: GeminiRequest, signal?: AbortSignal): Promise<any> {
   const accessCode = typeof localStorage !== 'undefined' ? localStorage.getItem('vera_access_code') || '' : '';
-  // La signal se pasa a fetch (soporte nativo): al abortar, la petición al proxy
-  // /api/gemini se cancela de verdad — no queda un fetch colgado en segundo plano.
-  const res = await fetch('/api/gemini', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-access-code': accessCode,
-    },
-    body: JSON.stringify(payload),
-    signal,
-  });
 
-  let data: any = null;
-  try { data = await res.json(); } catch { data = null; }
+  // attempt=0 es la petición inicial; 1..MAX_RETRIES son los reintentos. Todo el
+  // bucle vive dentro del plazo de CHAT_TIMEOUT_MS: al vencer, la signal aborta
+  // tanto el fetch como el sleep, así que los reintentos NO amplían el plazo.
+  for (let attempt = 0; ; attempt++) {
+    // La signal se pasa a fetch (soporte nativo): al abortar, la petición al proxy
+    // /api/gemini se cancela de verdad — no queda un fetch colgado en segundo plano.
+    const res = await fetch('/api/gemini', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-access-code': accessCode,
+      },
+      body: JSON.stringify(payload),
+      signal,
+    });
 
-  // Access revoked (or code invalid): clear it and reload back to the access gate.
-  if (res.status === 401 && data?.error === 'UNAUTHORIZED') {
-    try { localStorage.removeItem('vera_access_code'); } catch {}
-    if (typeof window !== 'undefined') window.location.reload();
-    throw new Error('Acceso no autorizado.');
+    let data: any = null;
+    try { data = await res.json(); } catch { data = null; }
+
+    // Access revoked (or code invalid): clear it and reload back to the access gate.
+    if (res.status === 401 && data?.error === 'UNAUTHORIZED') {
+      try { localStorage.removeItem('vera_access_code'); } catch {}
+      if (typeof window !== 'undefined') window.location.reload();
+      throw new Error('Acceso no autorizado.');
+    }
+
+    if (!res.ok) {
+      // Saturación de Google (503) o rate limit (429): reintenta con espera
+      // creciente. Un 400/401 cae directo al throw de abajo, sin reintentar.
+      if (RETRYABLE_STATUS.has(res.status) && attempt < MAX_RETRIES) {
+        const nextAttempt = attempt + 1;
+        console.warn(`[Vera retry] intento ${nextAttempt} tras ${res.status}`);
+        await sleep(backoffMs(nextAttempt), signal); // lanza AbortError si se aborta la espera
+        continue;
+      }
+
+      const isOwnRateLimit = data?.error === 'RATE_LIMIT';
+      const err: any = new Error(
+        isOwnRateLimit
+          ? (data?.message || 'Demasiadas peticiones. Espera un minuto e inténtalo de nuevo.')
+          : (data?.message || `Gemini request failed (${res.status}).`)
+      );
+      err.status = res.status;
+      err.code = data?.error;
+      err.rateLimited = isOwnRateLimit;
+      throw err;
+    }
+
+    return data || {};
   }
-
-  if (!res.ok) {
-    const isOwnRateLimit = data?.error === 'RATE_LIMIT';
-    const err: any = new Error(
-      isOwnRateLimit
-        ? (data?.message || 'Demasiadas peticiones. Espera un minuto e inténtalo de nuevo.')
-        : (data?.message || `Gemini request failed (${res.status}).`)
-    );
-    err.status = res.status;
-    err.code = data?.error;
-    err.rateLimited = isOwnRateLimit;
-    throw err;
-  }
-
-  return data || {};
 }
 
 export async function sendMessageToVera(messages: Message[], currentMode: Mode, simulationContext?: Simulation, teachingLang: 'es' | 'en' = 'es'): Promise<string> {
@@ -705,6 +756,11 @@ export async function sendMessageToVera(messages: Message[], currentMode: Mode, 
     if (error?.rateLimited) throw error;
     if (error?.status === 429) {
       throw new Error("Vera está recibiendo demasiadas peticiones ahora mismo. Espera un momento e inténtalo de nuevo.");
+    }
+    // 503 tras agotar los reintentos: el modelo está saturado en Google, no es un
+    // fallo de la app. Dilo tal cual para que el usuario sepa que es temporal.
+    if (error?.status === 503) {
+      throw new Error("El modelo de Vera está saturado en Google en este momento. Vuelve a intentarlo en unos minutos.");
     }
     throw new Error("Vera no pudo responder. Inténtalo de nuevo en un momento.");
   } finally {
