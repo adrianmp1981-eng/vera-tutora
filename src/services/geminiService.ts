@@ -21,6 +21,11 @@ const MODELS = {
   image:   "imagen-3.0-generate-002",
 };
 
+// Plazo máximo de una respuesta de chat. Antes eran 15s y saltaba incluso con
+// mensajes cortos; a 45s hay margen para respuestas largas / arranques en frío
+// del proxy sin dejar al usuario colgado indefinidamente.
+const CHAT_TIMEOUT_MS = 45000;
+
 const SYSTEM_INSTRUCTION_SHORT = `You are Vera, an elite personal tutor. You speak in natural California American English. You are warm, direct, and highly knowledgeable.
 
 YOUR CORE RULES:
@@ -604,8 +609,10 @@ export interface GeminiRequest {
  * API key never reaches the browser. Keeps the { text } response shape that the
  * rest of this file relies on.
  */
-async function callGemini(payload: GeminiRequest): Promise<any> {
+async function callGemini(payload: GeminiRequest, signal?: AbortSignal): Promise<any> {
   const accessCode = typeof localStorage !== 'undefined' ? localStorage.getItem('vera_access_code') || '' : '';
+  // La signal se pasa a fetch (soporte nativo): al abortar, la petición al proxy
+  // /api/gemini se cancela de verdad — no queda un fetch colgado en segundo plano.
   const res = await fetch('/api/gemini', {
     method: 'POST',
     headers: {
@@ -613,6 +620,7 @@ async function callGemini(payload: GeminiRequest): Promise<any> {
       'x-access-code': accessCode,
     },
     body: JSON.stringify(payload),
+    signal,
   });
 
   let data: any = null;
@@ -663,26 +671,35 @@ export async function sendMessageToVera(messages: Message[], currentMode: Mode, 
   Then provide your text explanation below.
   `;
 
-  try {
-    const timeoutPromise = new Promise<never>((_, reject) => 
-      setTimeout(() => reject(new Error('Vera tardó demasiado. Intenta de nuevo.')), 15000)
-    );
+  // AbortController en vez de Promise.race: al vencer el plazo abortamos la
+  // petición de verdad (la signal llega hasta fetch), así no queda una llamada
+  // viva en segundo plano gastando cuota como pasaba con el race.
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+    // El log [Vera timing] solo se emitía al llegar la respuesta; un timeout no
+    // dejaba rastro. Ahora registramos cuánto esperamos realmente antes de cortar.
+    console.warn(`[Vera timing] TIMEOUT tras ${Date.now() - startedAt}ms`);
+  }, CHAT_TIMEOUT_MS);
 
-    const responsePromise = callGemini({
+  try {
+    const response = await callGemini({
       model: MODELS.chat,
       contents: [...history, { role: "user", parts: [{ text: visualPrompt }] }],
       config: {
         systemInstruction: buildSystemPrompt(messages, lastMessage, currentMode, simulationContext, teachingLang),
         temperature: 0.5
       },
-    });
-
-    const response = await Promise.race([responsePromise, timeoutPromise]);
+    }, controller.signal);
     return response.text || "Sorry, I could not process that. Try again.";
   } catch (error: any) {
     console.error("Chat error:", error);
-    if (error instanceof Error && error.message === 'Vera tardó demasiado. Intenta de nuevo.') {
-      throw error;
+    // fetch abortado por nuestro timeout -> mensaje de "tardó demasiado".
+    if (timedOut || error?.name === 'AbortError') {
+      throw new Error('Vera tardó demasiado. Intenta de nuevo.');
     }
     // Surface our own rate limit and Gemini quota (429) so the user sees the real reason.
     if (error?.rateLimited) throw error;
@@ -690,6 +707,8 @@ export async function sendMessageToVera(messages: Message[], currentMode: Mode, 
       throw new Error("Vera está recibiendo demasiadas peticiones ahora mismo. Espera un momento e inténtalo de nuevo.");
     }
     throw new Error("Vera no pudo responder. Inténtalo de nuevo en un momento.");
+  } finally {
+    clearTimeout(timer);
   }
 }
 
