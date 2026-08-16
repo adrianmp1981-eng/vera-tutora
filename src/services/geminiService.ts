@@ -15,9 +15,13 @@ import { getBaseLang } from "./voiceLang";
 
 const PORTRAIT_CACHE_KEY = "vera_portrait_b64";
 
+// Versiones ESTABLES fijadas, no alias -latest: los -latest se hot-swapean al
+// modelo más nuevo (el de menos capacidad → más 503). gemini-3.5-flash es GA y
+// el destino de migración oficial del 2.5-flash (que cierra el 16-oct-2026);
+// gemini-3.5-flash-lite es GA de baja latencia. Ninguno tiene cierre anunciado.
 const MODELS = {
-  chat:    "gemini-flash-latest",
-  summary: "gemini-flash-lite-latest",
+  chat:    "gemini-3.5-flash",
+  summary: "gemini-3.5-flash-lite",
   image:   "imagen-3.0-generate-002",
 };
 
