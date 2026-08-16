@@ -122,6 +122,41 @@ export const stripLanguageTags = (text: string): string =>
   text.replace(LANG_TAG_RE, '');
 
 /**
+ * Remove emoji and pictographs from SPOKEN text so the TTS engine does not
+ * verbalize them ("👉" was being read aloud as "mano"). Strips every
+ * Extended_Pictographic glyph together with the machinery that composes it —
+ * variation selector (FE0F), zero-width joiner (200D), skin-tone modifiers and
+ * keycaps — plus regional-indicator flags. Letters (incl. ñ and accents), ¿ ¡
+ * and ordinary punctuation are left untouched. Pure: used only for the voice,
+ * never for the chat message that gets rendered.
+ */
+export const stripEmoji = (text: string): string => {
+  const emoji = new RegExp(
+    '(?:' +
+      // Keycap: digit / # / * + optional VS16 + combining enclosing keycap.
+      '[#*0-9]\\uFE0F?\\u20E3' +
+      '|' +
+      // Regional-indicator pair (flags).
+      '[\\u{1F1E6}-\\u{1F1FF}]{2}' +
+      '|' +
+      // Pictograph + optional modifier/VS, then any ZWJ-joined continuation.
+      '\\p{Extended_Pictographic}(?:\\p{Emoji_Modifier}|\\uFE0F)?' +
+      '(?:\\u200D\\p{Extended_Pictographic}(?:\\p{Emoji_Modifier}|\\uFE0F)?)*' +
+    ')',
+    'gu'
+  );
+  // Sweep any orphaned combining chars a partial sequence could leave behind:
+  // ZWJ (200D), variation selector (FE0F), keycap (20E3), skin-tone modifiers.
+  const orphans = new RegExp('[\\u200D\\uFE0F\\u20E3\\u{1F3FB}-\\u{1F3FF}]', 'gu');
+  return text
+    .replace(emoji, '')
+    .replace(orphans, '')
+    // Collapse the gap the removal opened; keep single spaces.
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+};
+
+/**
  * Turn tagged text into language segments the voice can speak.
  * - [EN]…[/EN] → en-US, [ES]…[/ES] → es-ES, [PT]…[/PT] → pt-PT.
  * - Text OUTSIDE any tag: assigned to `baseLang` when given (deterministic, NO

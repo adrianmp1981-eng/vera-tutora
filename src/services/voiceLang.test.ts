@@ -6,6 +6,7 @@ import {
   getBaseLang,
   mergeShortForeignSegments,
   chunkForSpeech,
+  stripEmoji,
 } from './voiceLang';
 
 // All word/number tokens, order-preserving — used to prove no text is lost.
@@ -16,6 +17,45 @@ const tokens = (s: string): string[] => s.match(/\p{L}+|\d+/gu) || [];
 const TAG_TOKEN = /\[\/?(?:EN|ES|PT)\]/;
 
 const hasNoTagToken = (s: string) => expect(s).not.toMatch(TAG_TOKEN);
+
+describe('stripEmoji', () => {
+  // Any leftover emoji-machinery char: pictographs, ZWJ (200D), variation
+  // selector (FE0F), skin-tone modifiers, combining keycap (20E3). If the
+  // output still matches this, we left residue behind.
+  const EMOJI_RESIDUE =
+    /[\p{Extended_Pictographic}‍️⃣\u{1F3FB}-\u{1F3FF}\u{1F1E6}-\u{1F1FF}]/u;
+
+  it('quita el emoji y deja el texto intacto ("👉 lead time")', () => {
+    const out = stripEmoji('Escribe esto 👉 lead time');
+    expect(out).not.toMatch(EMOJI_RESIDUE);
+    // El texto sobrevive palabra por palabra.
+    expect(tokens(out)).toEqual(['Escribe', 'esto', 'lead', 'time']);
+    // Sin dobles espacios donde estaba el emoji.
+    expect(out).toBe('Escribe esto lead time');
+  });
+
+  it('elimina un emoji ZWJ y uno con tono de piel enteros, sin residuos', () => {
+    const out = stripEmoji('Hola 👨‍👩‍👧 y 👍🏽 fin');
+    expect(out).not.toMatch(EMOJI_RESIDUE);
+    expect(tokens(out)).toEqual(['Hola', 'y', 'fin']);
+  });
+
+  it('elimina un keycap (1️⃣) entero', () => {
+    const out = stripEmoji('Paso 1️⃣ listo');
+    expect(out).not.toMatch(EMOJI_RESIDUE);
+    expect(tokens(out)).toEqual(['Paso', 'listo']);
+  });
+
+  it('NO toca ñ, tildes, ¿ ¡ ni comillas', () => {
+    const input = '¿Cómo estás, niño? ¡Añade «señal» del día!';
+    expect(stripEmoji(input)).toBe(input);
+  });
+
+  it('un texto que es solo un emoji queda vacío y chunkForSpeech lo descarta', () => {
+    expect(stripEmoji('👉')).toBe('');
+    expect(chunkForSpeech(stripEmoji('👉'), 200)).toEqual([]);
+  });
+});
 
 describe('parseLanguageTags', () => {
   it('assigns the tagged language to mixed text with all three tags', () => {
