@@ -250,6 +250,14 @@ export const parseLanguageTags = (text: string, baseLang?: string): LangSegment[
 
 const wordCount = (s: string): number => (s.match(/\p{L}+/gu) || []).length;
 
+// Un trozo se considera "huérfano" (y se funde con un vecino) si tiene muy pocas
+// palabras o muy pocos caracteres: como utterance propia, el hueco antes de él
+// se oye como una pausa larga.
+const MIN_CHUNK_WORDS = 4;
+const MIN_CHUNK_CHARS = 25;
+const isOrphanChunk = (s: string): boolean =>
+  wordCount(s) < MIN_CHUNK_WORDS || s.length < MIN_CHUNK_CHARS;
+
 // Strip leading orphan punctuation and line breaks (e.g. ":\n\n\n") that appear
 // at the start of a chunk; the voice should not read them.
 const cleanChunkStart = (s: string): string => s.replace(/^[\s:;,.]+/, '').trim();
@@ -310,10 +318,39 @@ export const chunkForSpeech = (text: string, maxLen = 200): string[] => {
   }
   if (current) chunks.push(current);
 
-  return chunks.map(cleanChunkStart).filter(Boolean);
+  const finalized = chunks.map(cleanChunkStart).filter(Boolean);
+
+  // Funde los trozos huérfanos (una palabra o dos sueltas) con un vecino: el
+  // hueco entre utterances se oía como una pausa larga justo antes de esa
+  // palabra ("...lista para ser [pausa] utilizada"). Mejor un trozo un poco más
+  // largo que maxLen que una palabra suelta. Se preserva TODO el texto.
+  const coalesced: string[] = [];
+  for (const chunk of finalized) {
+    const prev = coalesced[coalesced.length - 1];
+    if (prev !== undefined && isOrphanChunk(chunk)) {
+      coalesced[coalesced.length - 1] = `${prev} ${chunk}`;
+    } else {
+      coalesced.push(chunk);
+    }
+  }
+  // Un primer trozo corto no tiene "anterior" con quien fundirse: fúndelo hacia
+  // adelante en el siguiente.
+  if (coalesced.length >= 2 && isOrphanChunk(coalesced[0])) {
+    coalesced[1] = `${coalesced[0]} ${coalesced[1]}`;
+    coalesced.shift();
+  }
+
+  return coalesced;
 };
 
 /**
+ * ⚠️ NO SE USA en el pipeline de voz (speakText). Se quitó a propósito: Vera
+ * enseña idiomas y Adri necesita la pronunciación NATIVA de cada término inglés,
+ * incluidos los de dos palabras como "lead time". Fundir tramos cortos en la voz
+ * base suavizaba las transiciones pero enseñaba mal la pronunciación — mal
+ * criterio para esta app. Se conserva (con sus tests) por si sirve en otro
+ * contexto donde la suavidad importe más que la pronunciación.
+ *
  * Absorb short foreign snippets into the base voice so the voice does not brake
  * for them. A tiny foreign segment (≤3 words) that is surrounded by base-language
  * segments is re-labeled to `baseLang` (the Spanish voice saying "supply chain"

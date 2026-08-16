@@ -74,7 +74,7 @@ import {
   getCoverage,
 } from './services/curriculumService';
 import { getMemory, saveMemory, updateMemory, hasMemory } from './services/memoryService';
-import { detectLanguage, parseLanguageTags, stripLanguageTags, getBaseLang, mergeShortForeignSegments, chunkForSpeech, stripEmoji, stripSpeechMarkers } from './services/voiceLang';
+import { detectLanguage, parseLanguageTags, stripLanguageTags, getBaseLang, chunkForSpeech, stripEmoji, stripSpeechMarkers } from './services/voiceLang';
 import { WeeklyStats } from './types';
 import {
   Flashcard,
@@ -796,9 +796,11 @@ export default function App() {
       .map((s) => ({ text: stripSpeechMarkers(stripEmoji(cleanSpeechText(s.text))), lang: s.lang }))
       .filter((s) => s.text.length > 0);
 
-    // Funde tramos extranjeros muy cortos rodeados del idioma base en la voz base:
-    // suena más natural que frenar para cambiar de voz por "supply chain".
-    if (baseLang) segments = mergeShortForeignSegments(segments, baseLang);
+    // NO fundimos tramos extranjeros cortos en la voz base: Vera enseña idiomas y
+    // Adri necesita la pronunciación nativa de CADA término (incluidos los de dos
+    // palabras como "lead time"). TODO tramo etiquetado se pronuncia en su idioma,
+    // sin excepción de longitud — enseñar bien pesa más que suavizar transiciones.
+    // (mergeShortForeignSegments queda en voiceLang.ts pero ya NO se usa aquí.)
 
     // Trocea cada segmento en frases de ~200 chars (corte en límite de frase o, si
     // no, en coma/espacio; nunca a mitad de palabra). Se habla TODO el texto: sin
@@ -808,7 +810,9 @@ export default function App() {
     );
     if (segments.length === 0) return;
 
-    console.log('[Vera voice]', segments.map((s) => `${s.lang}:${s.text.slice(0, 30)}`));
+    // Texto COMPLETO de cada segmento (con 30 chars no se podía auditar el
+    // etiquetado por idioma ni las transiciones de voz).
+    console.log('[Vera voice]', segments.map((s) => `${s.lang}:${s.text}`));
 
     // Esta llamada se convierte en la secuencia vigente; invalida las anteriores.
     const mySeq = ++speechSeqRef.current;

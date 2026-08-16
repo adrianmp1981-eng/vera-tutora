@@ -546,7 +546,7 @@ function buildLanguageDiscipline(mode: Mode | undefined, teachingLang: 'es' | 'e
   return `\n\nLANGUAGE DISCIPLINE (this overrides any earlier instruction about matching the user's language):
 ${rule}
 
-LANGUAGE TAGGING: Whenever a word or phrase is in a language different from the one you are writing in, wrap it so it is pronounced correctly: [EN]...[/EN] for English, [ES]...[/ES] for Spanish, [PT]...[/PT] for Portuguese. Never mention these tags to Adri — they are processed automatically.`;
+LANGUAGE TAGGING: Whenever a word or phrase is in a language different from the one you are writing in, wrap it so it is pronounced correctly: [EN]...[/EN] for English, [ES]...[/ES] for Spanish, [PT]...[/PT] for Portuguese. Tag EVERY word or phrase in another language, without exception — including two-word technical terms like [EN]lead time[/EN]. Consistency matters more than brevity: if some foreign terms are tagged and others are left loose, the voice keeps switching accents mid-sentence. Never mention these tags to Adri — they are processed automatically.`;
 }
 
 function buildSystemPrompt(messages: Message[], lastMessage: string, mode?: Mode, simulationContext?: Simulation, teachingLang: 'es' | 'en' = 'es'): string {

@@ -201,6 +201,35 @@ describe('chunkForSpeech', () => {
   it('keeps a short text as a single chunk and strips leading orphan punctuation', () => {
     expect(chunkForSpeech(':\n\n\nHola equipo, buenos días.', 200)).toEqual(['Hola equipo, buenos días.']);
   });
+
+  it('no deja una palabra huérfana al final: la funde con el trozo anterior', () => {
+    // Frase larga (una sola unidad, sin puntos) que al cortar a ~200 dejaba
+    // "hoy" como trozo propio → pausa larga antes de esa palabra.
+    const input = Array(20).fill('logistica').join(' ') + ' hoy';
+    expect(input.length).toBeGreaterThan(200);
+
+    const chunks = chunkForSpeech(input, 200);
+
+    // Ningún trozo de una sola palabra.
+    for (const c of chunks) expect(tokens(c).length).toBeGreaterThan(1);
+    // No se pierde texto: todas las palabras, en orden.
+    expect(tokens(chunks.join(' '))).toEqual(tokens(input));
+    // El huérfano quedó absorbido en el último trozo.
+    expect(chunks[chunks.length - 1]).toContain('hoy');
+  });
+
+  it('funde también un trozo corto intermedio/inicial (no solo el final)', () => {
+    // "Ir." es una frase corta seguida de una MUY larga: quedaba como trozo de
+    // una palabra al principio.
+    const longSentence = Array(30).fill('palabra').join(' ') + '.';
+    const input = 'Ir. ' + longSentence;
+
+    const chunks = chunkForSpeech(input, 200);
+
+    for (const c of chunks) expect(tokens(c).length).toBeGreaterThan(1);
+    expect(tokens(chunks.join(' '))).toEqual(tokens(input));
+    expect(chunks[0]).toContain('Ir');
+  });
 });
 
 describe('mergeShortForeignSegments', () => {
