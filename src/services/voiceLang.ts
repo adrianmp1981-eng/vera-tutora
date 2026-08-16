@@ -157,6 +157,32 @@ export const stripEmoji = (text: string): string => {
 };
 
 /**
+ * Second pass of non-spoken cleanup for SPOKEN text (see stripEmoji for the
+ * first). Handles symbols that are not pictographs so stripEmoji leaves them:
+ *   - Bullets (• ▪ ● ‣ ⁃): removed anywhere — never spoken, never part of a word.
+ *   - List markers (- or *) at the START of a line: removed with their indent
+ *     and trailing space. A hyphen MID-line (compound words, ranges like 10-20,
+ *     a dash between clauses) is left untouched — the anchor requires line start.
+ *   - Blockquote '>' at the start of a line: removed.
+ *   - Arrows (→ ← ↔ ⇒): replaced by a comma, NOT deleted nor read aloud. A comma
+ *     gives the short, natural pause every TTS engine honors (semicolon support
+ *     is uneven), which fits the "A → B" link between two short ideas.
+ * Pure. Applied only to the voice; the chat keeps every character.
+ */
+export const stripSpeechMarkers = (text: string): string =>
+  text
+    .replace(/\s*[→←↔⇒]\s*/g, ', ')
+    .replace(/[•▪●‣⁃]/g, '')
+    .replace(/^[ \t]*[-*]+[ \t]+/gm, '')
+    .replace(/^[ \t]*>+[ \t]?/gm, '')
+    // Tidy the gaps the removals opened, per line, without touching the newlines
+    // that chunkForSpeech still needs.
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/^[ \t]+/gm, '')
+    .replace(/^,[ \t]*/, '')
+    .trim();
+
+/**
  * Turn tagged text into language segments the voice can speak.
  * - [EN]…[/EN] → en-US, [ES]…[/ES] → es-ES, [PT]…[/PT] → pt-PT.
  * - Text OUTSIDE any tag: assigned to `baseLang` when given (deterministic, NO

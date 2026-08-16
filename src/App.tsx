@@ -74,7 +74,7 @@ import {
   getCoverage,
 } from './services/curriculumService';
 import { getMemory, saveMemory, updateMemory, hasMemory } from './services/memoryService';
-import { detectLanguage, parseLanguageTags, stripLanguageTags, getBaseLang, mergeShortForeignSegments, chunkForSpeech, stripEmoji } from './services/voiceLang';
+import { detectLanguage, parseLanguageTags, stripLanguageTags, getBaseLang, mergeShortForeignSegments, chunkForSpeech, stripEmoji, stripSpeechMarkers } from './services/voiceLang';
 import { WeeklyStats } from './types';
 import {
   Flashcard,
@@ -788,10 +788,12 @@ export default function App() {
     // las etiquetas (base = baseLang), y limpia markdown inline por segmento.
     const source = stripNonSpoken(spoken ?? text);
     let segments = parseLanguageTags(source, baseLang)
-      // Limpia markdown Y emojis por segmento (el TTS leía "👉" como "mano"). El
-      // chat NO se toca: esto solo afecta al texto hablado. El filtro descarta un
-      // tramo que quede vacío tras limpiar (p. ej. uno que era solo un emoji).
-      .map((s) => ({ text: stripEmoji(cleanSpeechText(s.text)), lang: s.lang }))
+      // Limpia markdown, emojis y símbolos no hablables (viñetas, marcadores de
+      // lista, blockquote; flechas → pausa) por segmento (el TTS leía "👉" como
+      // "mano"). El chat NO se toca: esto solo afecta al texto hablado. El filtro
+      // descarta un tramo que quede vacío tras limpiar (p. ej. uno que era solo
+      // un emoji o una viñeta suelta).
+      .map((s) => ({ text: stripSpeechMarkers(stripEmoji(cleanSpeechText(s.text))), lang: s.lang }))
       .filter((s) => s.text.length > 0);
 
     // Funde tramos extranjeros muy cortos rodeados del idioma base en la voz base:

@@ -7,6 +7,7 @@ import {
   mergeShortForeignSegments,
   chunkForSpeech,
   stripEmoji,
+  stripSpeechMarkers,
 } from './voiceLang';
 
 // All word/number tokens, order-preserving — used to prove no text is lost.
@@ -54,6 +55,45 @@ describe('stripEmoji', () => {
   it('un texto que es solo un emoji queda vacío y chunkForSpeech lo descarta', () => {
     expect(stripEmoji('👉')).toBe('');
     expect(chunkForSpeech(stripEmoji('👉'), 200)).toEqual([]);
+  });
+});
+
+describe('stripSpeechMarkers', () => {
+  it('quita viñetas (• ▪ ● ‣ ⁃) y deja el texto', () => {
+    const out = stripSpeechMarkers('• uno\n▪ dos\n● tres\n‣ cuatro\n⁃ cinco');
+    expect(out).not.toMatch(/[•▪●‣⁃]/);
+    expect(tokens(out)).toEqual(['uno', 'dos', 'tres', 'cuatro', 'cinco']);
+  });
+
+  it('quita el marcador de lista (- o *) SOLO al inicio de línea', () => {
+    const out = stripSpeechMarkers('- lead time\n* supply chain');
+    expect(out).toBe('lead time\nsupply chain');
+  });
+
+  it('quita el > de blockquote al inicio de línea', () => {
+    expect(stripSpeechMarkers('> cuidado aquí')).toBe('cuidado aquí');
+  });
+
+  it('sustituye una flecha por una pausa (coma), sin dejar el símbolo', () => {
+    const out = stripSpeechMarkers('proceso → diagrama');
+    expect(out).not.toMatch(/[→←↔⇒]/);
+    expect(out).toBe('proceso, diagrama');
+  });
+
+  it('sustituye todas las flechas (← ↔ ⇒) por coma', () => {
+    expect(stripSpeechMarkers('a ← b')).toBe('a, b');
+    expect(stripSpeechMarkers('a ↔ b')).toBe('a, b');
+    expect(stripSpeechMarkers('a ⇒ b')).toBe('a, b');
+  });
+
+  it('NO toca un guion a mitad de frase: compuestos y rangos intactos', () => {
+    const input = 'Es cost-effective y el rango 10-20 en supply-chain, no lista.';
+    expect(stripSpeechMarkers(input)).toBe(input);
+  });
+
+  it('NO toca un guion suelto usado como raya a mitad de línea', () => {
+    const input = 'Vera - tu tutora - te ayuda';
+    expect(stripSpeechMarkers(input)).toBe(input);
   });
 });
 
