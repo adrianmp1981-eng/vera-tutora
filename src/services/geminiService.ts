@@ -20,10 +20,22 @@ const PORTRAIT_CACHE_KEY = "vera_portrait_b64";
 // el destino de migración oficial del 2.5-flash (que cierra el 16-oct-2026);
 // gemini-3.5-flash-lite es GA de baja latencia. Ninguno tiene cierre anunciado.
 const MODELS = {
-  chat:    "gemini-3.5-flash",
-  summary: "gemini-3.5-flash-lite",
-  image:   "imagen-3.0-generate-002",
+  chat:         "gemini-3.5-flash",
+  // Fallback cuando el primario sigue en 503 tras agotar los reintentos. Modelo
+  // estable GA distinto y más ligero (menor demanda → más capacidad ante
+  // saturación), sin cierre anunciado. Una respuesta algo más simple > sin voz.
+  chatFallback: "gemini-3.1-flash-lite",
+  summary:      "gemini-3.5-flash-lite",
+  image:        "imagen-3.0-generate-002",
 };
+
+/**
+ * Qué modelo de chat toca en cada intento: el intento 0 es el primario; del 1 en
+ * adelante, el fallback. Pura y determinista — testeada en geminiService.test.ts.
+ */
+export function chatModelForAttempt(attempt: number): string {
+  return attempt <= 0 ? MODELS.chat : MODELS.chatFallback;
+}
 
 // Plazo máximo de una respuesta de chat. Antes eran 15s y saltaba incluso con
 // mensajes cortos; a 45s hay margen para respuestas largas / arranques en frío
@@ -652,55 +664,76 @@ export interface GeminiRequest {
 async function callGemini(payload: GeminiRequest, signal?: AbortSignal): Promise<any> {
   const accessCode = typeof localStorage !== 'undefined' ? localStorage.getItem('vera_access_code') || '' : '';
 
-  // attempt=0 es la petición inicial; 1..MAX_RETRIES son los reintentos. Todo el
-  // bucle vive dentro del plazo de CHAT_TIMEOUT_MS: al vencer, la signal aborta
-  // tanto el fetch como el sleep, así que los reintentos NO amplían el plazo.
-  for (let attempt = 0; ; attempt++) {
-    // La signal se pasa a fetch (soporte nativo): al abortar, la petición al proxy
-    // /api/gemini se cancela de verdad — no queda un fetch colgado en segundo plano.
-    const res = await fetch('/api/gemini', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-access-code': accessCode,
-      },
-      body: JSON.stringify(payload),
-      signal,
-    });
+  // Recuerda el último status HTTP visto. Si nos abortan (timeout) mientras
+  // esperábamos/reintentábamos un 503/429, propagamos ESE status en vez de un
+  // AbortError crudo, para que quien llama pueda dar el mensaje honesto de
+  // saturación en vez de jerga técnica ("signal is aborted without reason").
+  let lastStatus = 0;
 
-    let data: any = null;
-    try { data = await res.json(); } catch { data = null; }
+  try {
+    // attempt=0 es la petición inicial; 1..MAX_RETRIES son los reintentos. Todo el
+    // bucle vive dentro del plazo de CHAT_TIMEOUT_MS: al vencer, la signal aborta
+    // tanto el fetch como el sleep, así que los reintentos NO amplían el plazo.
+    for (let attempt = 0; ; attempt++) {
+      // La signal se pasa a fetch (soporte nativo): al abortar, la petición al proxy
+      // /api/gemini se cancela de verdad — no queda un fetch colgado en segundo plano.
+      const res = await fetch('/api/gemini', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-access-code': accessCode,
+        },
+        body: JSON.stringify(payload),
+        signal,
+      });
+      lastStatus = res.status;
 
-    // Access revoked (or code invalid): clear it and reload back to the access gate.
-    if (res.status === 401 && data?.error === 'UNAUTHORIZED') {
-      try { localStorage.removeItem('vera_access_code'); } catch {}
-      if (typeof window !== 'undefined') window.location.reload();
-      throw new Error('Acceso no autorizado.');
-    }
+      let data: any = null;
+      try { data = await res.json(); } catch { data = null; }
 
-    if (!res.ok) {
-      // Saturación de Google (503) o rate limit (429): reintenta con espera
-      // creciente. Un 400/401 cae directo al throw de abajo, sin reintentar.
-      if (RETRYABLE_STATUS.has(res.status) && attempt < MAX_RETRIES) {
-        const nextAttempt = attempt + 1;
-        console.warn(`[Vera retry] intento ${nextAttempt} tras ${res.status}`);
-        await sleep(backoffMs(nextAttempt), signal); // lanza AbortError si se aborta la espera
-        continue;
+      // Access revoked (or code invalid): clear it and reload back to the access gate.
+      if (res.status === 401 && data?.error === 'UNAUTHORIZED') {
+        try { localStorage.removeItem('vera_access_code'); } catch {}
+        if (typeof window !== 'undefined') window.location.reload();
+        throw new Error('Acceso no autorizado.');
       }
 
-      const isOwnRateLimit = data?.error === 'RATE_LIMIT';
-      const err: any = new Error(
-        isOwnRateLimit
-          ? (data?.message || 'Demasiadas peticiones. Espera un minuto e inténtalo de nuevo.')
-          : (data?.message || `Gemini request failed (${res.status}).`)
-      );
-      err.status = res.status;
-      err.code = data?.error;
-      err.rateLimited = isOwnRateLimit;
+      if (!res.ok) {
+        // Saturación de Google (503) o rate limit (429): reintenta con espera
+        // creciente. Un 400/401 cae directo al throw de abajo, sin reintentar.
+        if (RETRYABLE_STATUS.has(res.status) && attempt < MAX_RETRIES) {
+          const nextAttempt = attempt + 1;
+          console.warn(`[Vera retry] intento ${nextAttempt} tras ${res.status}`);
+          await sleep(backoffMs(nextAttempt), signal); // lanza AbortError si se aborta la espera
+          continue;
+        }
+
+        const isOwnRateLimit = data?.error === 'RATE_LIMIT';
+        const err: any = new Error(
+          isOwnRateLimit
+            ? (data?.message || 'Demasiadas peticiones. Espera un minuto e inténtalo de nuevo.')
+            : (data?.message || `Gemini request failed (${res.status}).`)
+        );
+        err.status = res.status;
+        err.code = data?.error;
+        err.rateLimited = isOwnRateLimit;
+        throw err;
+      }
+
+      return data || {};
+    }
+  } catch (error: any) {
+    // Nos abortaron (timeout) habiendo visto saturación: convierte el AbortError
+    // en un error con ese status, para que sendMessageToVera muestre el mensaje
+    // de 503/429 y no el AbortError. Cualquier otro error se propaga tal cual.
+    if (error?.name === 'AbortError' && RETRYABLE_STATUS.has(lastStatus)) {
+      // Solo el status: sin rateLimited ni mensaje técnico, así sendMessageToVera
+      // elige su mensaje limpio de 503/429 (no re-propaga este texto).
+      const err: any = new Error(`Gemini unavailable (${lastStatus}).`);
+      err.status = lastStatus;
       throw err;
     }
-
-    return data || {};
+    throw error;
   }
 }
 
@@ -740,31 +773,49 @@ export async function sendMessageToVera(messages: Message[], currentMode: Mode, 
     console.warn(`[Vera timing] TIMEOUT tras ${Date.now() - startedAt}ms`);
   }, CHAT_TIMEOUT_MS);
 
+  // Misma petición para cualquier modelo; solo cambia el `model`.
+  const buildPayload = (model: string): GeminiRequest => ({
+    model,
+    contents: [...history, { role: "user", parts: [{ text: visualPrompt }] }],
+    config: {
+      systemInstruction: buildSystemPrompt(messages, lastMessage, currentMode, simulationContext, teachingLang),
+      temperature: 0.5
+    },
+  });
+
   try {
-    const response = await callGemini({
-      model: MODELS.chat,
-      contents: [...history, { role: "user", parts: [{ text: visualPrompt }] }],
-      config: {
-        systemInstruction: buildSystemPrompt(messages, lastMessage, currentMode, simulationContext, teachingLang),
-        temperature: 0.5
-      },
-    }, controller.signal);
-    return response.text || "Sorry, I could not process that. Try again.";
+    try {
+      const response = await callGemini(buildPayload(chatModelForAttempt(0)), controller.signal);
+      return response.text || "Sorry, I could not process that. Try again.";
+    } catch (primaryError: any) {
+      // Fallback de modelo: si el primario quedó saturado (503) y AÚN queda plazo
+      // (no hemos hecho timeout), prueba UNA vez con el modelo alternativo antes
+      // de rendirse. Comparte la misma signal, así sigue dentro de CHAT_TIMEOUT_MS.
+      if (primaryError?.status === 503 && !timedOut) {
+        const fallbackModel = chatModelForAttempt(1);
+        console.warn(`[Vera fallback] reintentando con ${fallbackModel}`);
+        const response = await callGemini(buildPayload(fallbackModel), controller.signal);
+        return response.text || "Sorry, I could not process that. Try again.";
+      }
+      throw primaryError;
+    }
   } catch (error: any) {
     console.error("Chat error:", error);
-    // fetch abortado por nuestro timeout -> mensaje de "tardó demasiado".
-    if (timedOut || error?.name === 'AbortError') {
-      throw new Error('Vera tardó demasiado. Intenta de nuevo.');
-    }
-    // Surface our own rate limit and Gemini quota (429) so the user sees the real reason.
+    // Orden importa: si conocemos el status real (429/503) damos ESE mensaje,
+    // aunque el corte viniera del timeout — es más útil que "tardó demasiado" y
+    // nunca deja ver un AbortError. El genérico de timeout queda al final.
     if (error?.rateLimited) throw error;
     if (error?.status === 429) {
       throw new Error("Vera está recibiendo demasiadas peticiones ahora mismo. Espera un momento e inténtalo de nuevo.");
     }
-    // 503 tras agotar los reintentos: el modelo está saturado en Google, no es un
-    // fallo de la app. Dilo tal cual para que el usuario sepa que es temporal.
+    // 503 tras agotar reintentos Y fallback: el modelo está saturado en Google,
+    // no es un fallo de la app. Dilo tal cual para que sepa que es temporal.
     if (error?.status === 503) {
       throw new Error("El modelo de Vera está saturado en Google en este momento. Vuelve a intentarlo en unos minutos.");
+    }
+    // Sin status útil: si fue nuestro timeout/abort, "tardó demasiado".
+    if (timedOut || error?.name === 'AbortError') {
+      throw new Error('Vera tardó demasiado. Intenta de nuevo.');
     }
     throw new Error("Vera no pudo responder. Inténtalo de nuevo en un momento.");
   } finally {
